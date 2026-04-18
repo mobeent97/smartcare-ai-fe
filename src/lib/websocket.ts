@@ -1,0 +1,107 @@
+'use client';
+
+import type { TriageSession } from '@/types/api';
+
+const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8000';
+
+export class DashboardWebSocket {
+  private socket: WebSocket | null = null;
+  private token: string;
+  private reconnectDelay = 2000;
+  private maxReconnects = 5;
+  private reconnectCount = 0;
+  private onQueueUpdate: (sessionId: string, data: Partial<TriageSession>) => void;
+  private onEmergencyAlert: (alert: { sessionId: string; reason: string; redFlags: string[] }) => void;
+
+  constructor(
+    token: string,
+    onQueueUpdate: (sessionId: string, data: Partial<TriageSession>) => void,
+    onEmergencyAlert: (alert: { sessionId: string; reason: string; redFlags: string[] }) => void
+  ) {
+    this.token = token;
+    this.onQueueUpdate = onQueueUpdate;
+    this.onEmergencyAlert = onEmergencyAlert;
+  }
+
+  connect(): void {
+    const url = `${WS_BASE}/ws/dashboard/?token=${this.token}`;
+    this.socket = new WebSocket(url);
+
+    this.socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string);
+        if (msg.type === 'queue_update') {
+          this.onQueueUpdate(msg.data.session_id, {
+            ctas_level: msg.data.ctas_level,
+            status: msg.data.status,
+          });
+        } else if (msg.type === 'emergency_alert') {
+          this.onEmergencyAlert({
+            sessionId: msg.data.session_id,
+            reason: msg.data.reason,
+            redFlags: msg.data.red_flags ?? [],
+          });
+        }
+      } catch {
+        // malformed message — ignore
+      }
+    };
+
+    this.socket.onclose = (event) => {
+      if (event.code !== 4001 && this.reconnectCount < this.maxReconnects) {
+        this.reconnectCount++;
+        setTimeout(() => this.connect(), this.reconnectDelay);
+      }
+    };
+
+    this.socket.onerror = () => {
+      // onclose will fire after onerror — reconnect logic handles it
+    };
+  }
+
+  disconnect(): void {
+    this.socket?.close();
+    this.socket = null;
+    this.reconnectCount = 0;
+  }
+}
+
+export class BoothWebSocket {
+  private socket: WebSocket | null = null;
+  private sessionId: string;
+  private onDeviceComplete: (data: Record<string, unknown>) => void;
+  private onDeviceStatus: (status: string) => void;
+
+  constructor(
+    sessionId: string,
+    onDeviceComplete: (data: Record<string, unknown>) => void,
+    onDeviceStatus: (status: string) => void = () => {}
+  ) {
+    this.sessionId = sessionId;
+    this.onDeviceComplete = onDeviceComplete;
+    this.onDeviceStatus = onDeviceStatus;
+  }
+
+  connect(): void {
+    const url = `${WS_BASE}/ws/booth/${this.sessionId}/`;
+    this.socket = new WebSocket(url);
+
+    this.socket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string);
+        if (msg.type === 'device_reading_complete') {
+          this.onDeviceComplete(msg.data);
+        } else if (msg.type === 'device_status') {
+          this.onDeviceStatus(msg.data?.status ?? '');
+        }
+      } catch {
+        // malformed message — ignore
+      }
+    };
+  }
+
+  disconnect(): void {
+    this.socket?.close();
+    this.socket = null;
+  }
+}

@@ -1,0 +1,71 @@
+@import "tailwindcss";
+
+@theme inline {
+  /* Brand palette */
+  --color-primary: #36c9c5;
+  --color-primary-light: #09f6ee;
+  --color-primary-pearl: #34cbc8;
+  --color-primary-icy: #00ffe6;
+
+  /* Backgrounds */
+  --color-bg: #0a0f1e;
+  --color-surface: #111827;
+  --color-surface-raised: #1f2937;
+  --color-border: #374151;
+
+  /* CTAS urgency levels */
+  --color-ctas-1: #dc2626;
+  --color-ctas-2: #ea580c;
+  --color-ctas-3: #ca8a04;
+  --color-ctas-4: #16a34a;
+  --color-ctas-5: #2563eb;
+
+  /* Typography */
+  --font-sans: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background-color: #0a0f1e;
+  color: #f9fafb;
+  font-family: 'Inter', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Kiosk touch targets — all buttons minimum 48px tall */
+button {
+  min-height: 48px;
+  cursor: pointer;
+}
+
+/* Avatar glow ring */
+.avatar-glow {
+  box-shadow: 0 0 32px 4px rgba(0, 255, 230, 0.25);
+}
+
+/* CTAS pulse animation for emergency overlay */
+@keyframes ctas-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.75; }
+}
+
+.ctas-pulse {
+  animation: ctas-pulse 1.2s ease-in-out infinite;
+}
+
+/* Spinner */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.spinner {
+  animation: spin 1s linear infinite;
+}
