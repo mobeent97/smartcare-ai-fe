@@ -13,7 +13,7 @@ const QUICK_CHIPS = ['Chest Pain', 'Headache', 'Fever', 'Nausea', 'Injury', 'Dif
 export default function ComplaintPage() {
   const router = useRouter();
   const { sessionId } = useParams<{ sessionId: string }>();
-  const { isAvatarConnected, setAvatarSpeechText } = useBoothStore();
+  const { avatarStatus, setAvatarSpeechText } = useBoothStore();
   const [text, setText] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -37,7 +37,7 @@ export default function ComplaintPage() {
     <BoothLayout
       avatarPanel={
         <AvatarPanel
-          isLive={isAvatarConnected}
+          avatarStatus={avatarStatus}
           avatarType="nurse"
           speechText="What brings you in today? Describe your main symptom or concern."
         />

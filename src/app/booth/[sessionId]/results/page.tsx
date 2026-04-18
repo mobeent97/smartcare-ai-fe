@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { AKOOLAvatarManager } from '@/lib/akool';
@@ -13,23 +13,32 @@ import type { TriageSession } from '@/types/api';
 
 export default function TriageResultsPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
-  const { isAvatarConnected, setAkoolSessionId, measurementResult } = useBoothStore();
+  const { avatarStatus, setAkoolSessionId, measurementResult } = useBoothStore();
   const [session, setSession] = useState<TriageSession | null>(null);
   const [loading, setLoading] = useState(true);
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+  const managerStarted = useRef(false);
+
+  const handleVideoRef = useCallback((el: HTMLVideoElement | null) => {
+    videoElRef.current = el;
+  }, []);
 
   useEffect(() => {
-    // Switch to doctor avatar for final assessment
-    const manager = new AKOOLAvatarManager({
-      sessionId,
-      avatarType: 'doctor',
-      onReady: () => {},
-    });
-    manager.initialize().then(({ akoolSessionId }) => setAkoolSessionId(akoolSessionId)).catch(() => {});
-
-    // Fetch final session state
     api.getCaseDetail(sessionId)
       .then((res) => setSession(res.data))
       .finally(() => setLoading(false));
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (managerStarted.current || !videoElRef.current) return;
+    managerStarted.current = true;
+
+    const manager = new AKOOLAvatarManager({
+      sessionId,
+      avatarType: 'doctor',
+      videoElement: videoElRef.current,
+    });
+    manager.initialize().then(({ akoolSessionId }) => setAkoolSessionId(akoolSessionId)).catch(() => {});
   }, [sessionId, setAkoolSessionId]);
 
   const ctasLevel = session?.ctas_level;
@@ -40,13 +49,14 @@ export default function TriageResultsPage() {
     <BoothLayout
       avatarPanel={
         <AvatarPanel
-          isLive={isAvatarConnected}
+          avatarStatus={avatarStatus}
           avatarType="doctor"
           speechText={
             ctasLevel
               ? `Your triage assessment is complete. You have been assigned CTAS level ${ctasLevel}. Please proceed to the routing area indicated below.`
               : 'Your assessment is complete. A clinician will review your case shortly.'
           }
+          onVideoRef={handleVideoRef}
         />
       }
     >

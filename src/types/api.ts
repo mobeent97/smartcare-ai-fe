@@ -39,7 +39,9 @@ export interface AuditEvent {
 
 export interface AvatarSessionResponse {
   session_id: string;
+  agora_app_id?: string;
   agora_channel: string;
+  agora_token?: string;
   agora_uid: number;
   mode: 'live' | 'mock';
 }

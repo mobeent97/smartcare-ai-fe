@@ -19,7 +19,7 @@ const STEPS = [
 export default function VitalsMeasuringPage() {
   const router = useRouter();
   const { sessionId } = useParams<{ sessionId: string }>();
-  const { isAvatarConnected, setMeasurementResult } = useBoothStore();
+  const { avatarStatus, setMeasurementResult } = useBoothStore();
   const [measuring, setMeasuring] = useState(true);
   const [statusText, setStatusText] = useState('Connecting to device…');
 
@@ -55,7 +55,7 @@ export default function VitalsMeasuringPage() {
     <BoothLayout
       avatarPanel={
         <AvatarPanel
-          isLive={isAvatarConnected}
+          avatarStatus={avatarStatus}
           avatarType="nurse"
           speechText="I'll now measure your blood pressure. Please follow the steps on screen and stay still."
         />

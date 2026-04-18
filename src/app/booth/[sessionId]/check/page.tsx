@@ -11,7 +11,7 @@ import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 export default function CriticalCheckPage() {
   const router = useRouter();
   const { sessionId } = useParams<{ sessionId: string }>();
-  const { isAvatarConnected, setAvatarSpeechText } = useBoothStore();
+  const { avatarStatus, setAvatarSpeechText } = useBoothStore();
   const [loading, setLoading] = useState(false);
 
   async function handleAnswer(answer: 'yes' | 'no') {
@@ -35,7 +35,7 @@ export default function CriticalCheckPage() {
     <BoothLayout
       avatarPanel={
         <AvatarPanel
-          isLive={isAvatarConnected}
+          avatarStatus={avatarStatus}
           avatarType="nurse"
           speechText="Are you experiencing any of the following right now? Chest pain, difficulty breathing, severe bleeding, or loss of consciousness?"
         />

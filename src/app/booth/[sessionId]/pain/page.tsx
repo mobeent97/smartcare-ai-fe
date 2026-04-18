@@ -17,7 +17,7 @@ const PAIN_COLORS = [
 export default function PainPage() {
   const router = useRouter();
   const { sessionId } = useParams<{ sessionId: string }>();
-  const { isAvatarConnected, setAvatarSpeechText } = useBoothStore();
+  const { avatarStatus, setAvatarSpeechText } = useBoothStore();
   const [selected, setSelected] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -37,7 +37,7 @@ export default function PainPage() {
     <BoothLayout
       avatarPanel={
         <AvatarPanel
-          isLive={isAvatarConnected}
+          avatarStatus={avatarStatus}
           avatarType="nurse"
           speechText="On a scale of 1 to 10, how would you rate your pain or discomfort right now?"
         />

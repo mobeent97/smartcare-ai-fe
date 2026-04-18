@@ -15,7 +15,7 @@ const CLASSIFICATION_COLORS: Record<string, string> = {
 export default function VitalsResultsPage() {
   const router = useRouter();
   const { sessionId } = useParams<{ sessionId: string }>();
-  const { measurementResult, isAvatarConnected } = useBoothStore();
+  const { measurementResult, avatarStatus } = useBoothStore();
 
   const readings = measurementResult?.raw_readings ?? {};
   const classification = measurementResult?.classification ?? '—';
@@ -25,7 +25,7 @@ export default function VitalsResultsPage() {
     <BoothLayout
       avatarPanel={
         <AvatarPanel
-          isLive={isAvatarConnected}
+          avatarStatus={avatarStatus}
           avatarType="nurse"
           speechText={`Your blood pressure reading is complete. Classification: ${classification}. We'll factor this into your assessment.`}
         />

@@ -53,6 +53,18 @@ class ApiClient {
     return res.data;
   }
 
+  async sendAvatarMessage(akoolSessionId: string, text: string, sessionId: string) {
+    const res = await this.client.post('/triage/avatar/speak/', { akool_session_id: akoolSessionId, text, session_id: sessionId });
+    return res.data;
+  }
+
+  async getAvatarSessionStatus(akoolSessionId: string) {
+    const res = await this.client.get<ApiResponse<unknown>>('/triage/avatar/session/status/', {
+      params: { akool_session_id: akoolSessionId },
+    });
+    return res.data;
+  }
+
   async submitAnswer(sessionId: string, step: string, value: string) {
     const res = await this.client.post<ApiResponse<SubmitAnswerResponse>>(
       `/triage/sessions/${sessionId}/answer/`,

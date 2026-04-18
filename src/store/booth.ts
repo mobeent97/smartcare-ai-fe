@@ -10,18 +10,20 @@ export type BoothStep =
   | 'results'
   | 'emergency';
 
+export type AvatarStatus = 'idle' | 'connecting' | 'live';
+
 interface BoothState {
   sessionId: string | null;
   currentStep: BoothStep;
   avatarSpeechText: string;
   akoolSessionId: string | null;
-  isAvatarConnected: boolean;
+  avatarStatus: AvatarStatus;
   measurementResult: DeviceMeasurement | null;
   setSessionId: (id: string) => void;
   setCurrentStep: (step: BoothStep) => void;
   setAvatarSpeechText: (text: string) => void;
   setAkoolSessionId: (id: string) => void;
-  setAvatarConnected: (connected: boolean) => void;
+  setAvatarStatus: (status: AvatarStatus) => void;
   setMeasurementResult: (result: DeviceMeasurement) => void;
   reset: () => void;
 }
@@ -31,19 +33,19 @@ export const useBoothStore = create<BoothState>((set) => ({
   currentStep: 'welcome',
   avatarSpeechText: '',
   akoolSessionId: null,
-  isAvatarConnected: false,
+  avatarStatus: 'idle',
   measurementResult: null,
   setSessionId: (id) => set({ sessionId: id }),
   setCurrentStep: (step) => set({ currentStep: step }),
   setAvatarSpeechText: (text) => set({ avatarSpeechText: text }),
   setAkoolSessionId: (id) => set({ akoolSessionId: id }),
-  setAvatarConnected: (connected) => set({ isAvatarConnected: connected }),
+  setAvatarStatus: (status) => set({ avatarStatus: status }),
   setMeasurementResult: (result) => set({ measurementResult: result }),
   reset: () => set({
     sessionId: null,
     currentStep: 'welcome',
     akoolSessionId: null,
-    isAvatarConnected: false,
+    avatarStatus: 'idle',
     measurementResult: null,
     avatarSpeechText: '',
   }),
