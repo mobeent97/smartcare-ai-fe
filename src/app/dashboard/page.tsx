@@ -1,87 +1,29 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { DashboardWebSocket } from '@/lib/websocket';
+import {
+  patientDisplayId,
+  classifyBp,
+  classifyTemp,
+  splitReasoning,
+  STEP_LABELS,
+  AUDIT_COLORS,
+  TIMELINE_DOT_COLORS,
+} from '@/lib/dashboard-utils';
 import { useAuthStore } from '@/store/auth';
 import { useDashboardStore } from '@/store/dashboard';
+import { DashboardNav } from '@/components/dashboard/DashboardNav';
+import { QueuePanel } from '@/components/dashboard/QueuePanel';
 import { CTASBadge } from '@/components/dashboard/CTASBadge';
-import {
-  PatientListCard,
-  patientDisplayId,
-  priorityScore,
-} from '@/components/dashboard/PatientListCard';
 import { VitalCard } from '@/components/dashboard/VitalCard';
 import { EmergencyAlertModal } from '@/components/dashboard/EmergencyAlertModal';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import type { TriageSession, DeviceMeasurement, AuditEvent, TriageAnswer } from '@/types/api';
 
 type Tab = 'summary' | 'vitals' | 'answers' | 'audit';
-type SortKey = 'priority' | 'arrived' | 'wait';
-
-const STEP_LABELS: Record<string, string> = {
-  first_look: 'Emergency Screening',
-  complaint: 'Chief Complaint',
-  symptom_detail: 'Pain & Severity',
-  vitals: 'Vital Signs',
-};
-
-const AUDIT_COLORS: Record<string, string> = {
-  SESSION_START: '#3b82f6',
-  DEVICE_READ: '#22c55e',
-  CTAS_SCORED: '#eab308',
-  ALARM_TRIGGERED: '#dc2626',
-  AVATAR_SESSION_CREATED: '#36c9c5',
-  AVATAR_SESSION_CLOSED: '#207976',
-};
-
-function classifyBp(systolic?: number): {
-  label: string;
-  tone: 'green' | 'amber' | 'orange' | 'red' | 'muted';
-} {
-  if (systolic == null) return { label: '—', tone: 'muted' };
-  if (systolic < 120) return { label: 'Normal', tone: 'green' };
-  if (systolic < 130) return { label: 'Elevated', tone: 'amber' };
-  if (systolic < 140) return { label: 'Stage 1 HTN', tone: 'orange' };
-  if (systolic < 180) return { label: 'Stage 2 HTN', tone: 'red' };
-  return { label: 'Hypertensive Crisis', tone: 'red' };
-}
-
-function classifyTemp(f?: number): {
-  label: string;
-  tone: 'green' | 'amber' | 'orange' | 'red' | 'muted';
-} {
-  if (f == null) return { label: '—', tone: 'muted' };
-  if (f < 97) return { label: 'Hypothermia', tone: 'amber' };
-  if (f < 99.5) return { label: 'Normal', tone: 'green' };
-  if (f < 100.9) return { label: 'Low-grade Fever', tone: 'amber' };
-  if (f < 103) return { label: 'Fever', tone: 'orange' };
-  return { label: 'High Fever', tone: 'red' };
-}
-
-function splitReasoning(text: string | null): string[] {
-  if (!text) return [];
-  return text
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 2);
-}
-
-function sortPatients(queue: TriageSession[], key: SortKey): TriageSession[] {
-  const copy = [...queue];
-  if (key === 'priority') {
-    return copy.sort((a, b) => priorityScore(b) - priorityScore(a));
-  }
-  if (key === 'wait') {
-    return copy.sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
-  }
-  return copy.sort(
-    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-  );
-}
 
 export default function DashboardPage() {
   return (
@@ -95,11 +37,10 @@ function DashboardInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const caseParam = searchParams.get('case');
-  const { accessToken, userEmail, logout } = useAuthStore();
+  const { accessToken } = useAuthStore();
   const { queue, setQueue, updateQueueItem, emergencyAlert, setEmergencyAlert, clearEmergencyAlert } =
     useDashboardStore();
 
-  const [sortKey, setSortKey] = useState<SortKey>('priority');
   const [tab, setTab] = useState<Tab>('summary');
   const [caseDetail, setCaseDetail] = useState<TriageSession | null>(null);
   const [caseLoading, setCaseLoading] = useState(false);
@@ -117,8 +58,7 @@ function DashboardInner() {
       setQueue(res.data);
       const current = new URL(window.location.href).searchParams.get('case');
       if (!current && res.data.length > 0) {
-        const first = sortPatients(res.data, 'priority')[0];
-        router.replace(`/dashboard?case=${first.id}`);
+        router.replace(`/dashboard?case=${res.data[0].id}`);
       }
     });
 
@@ -143,7 +83,6 @@ function DashboardInner() {
       .finally(() => setCaseLoading(false));
   }, [caseParam, accessToken]);
 
-  const sorted = useMemo(() => sortPatients(queue, sortKey), [queue, sortKey]);
   const activeCount = queue.filter((s) => s.status !== 'COMPLETED').length;
 
   function selectCase(id: string) {
@@ -187,169 +126,26 @@ function DashboardInner() {
   if (!accessToken) return null;
 
   return (
-    <div className="min-h-screen" style={{ backgroundColor: '#051414' }}>
-      {/* ── Top header ─────────────────────────────────────────── */}
-      <header
-        className="flex items-center justify-between px-6"
-        style={{ backgroundColor: '#071c1c', borderBottom: '1px solid #155150', height: 48 }}
-      >
-        <div className="flex items-center gap-3">
-          <span style={{ width: 28, height: 28, borderRadius: '50%', backgroundColor: '#36c9c5', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, fontWeight: 800, color: '#051414' }}>+</span>
-          <span style={{ fontSize: 16, fontWeight: 800, color: '#f0fffe' }}>SmartCare</span>
-          <span style={{ color: '#155150', fontSize: 14 }}>|</span>
-          <span style={{ color: '#36c9c5', fontSize: 13, fontWeight: 500 }}>Clinician Dashboard</span>
-        </div>
+    <>
+      {/* ── Top Navigation ─────────────────────────────────── */}
+      <DashboardNav
+        activeBoothCount={activeCount}
+        hasAlert={!!emergencyAlert}
+      />
 
-        <div className="flex items-center gap-4">
-          <span
-            className="flex items-center gap-2"
-            style={{
-              color: '#36c9c5',
-              fontSize: 12,
-              fontWeight: 600,
-            }}
-          >
-            <span style={{ fontSize: 14 }}>🖥</span>
-            {activeCount} Booths Active
-          </span>
-
-          <button
-            aria-label="Notifications"
-            className="relative"
-            style={{
-              background: 'none',
-              border: 'none',
-              color: '#2aa2a0',
-              cursor: 'pointer',
-              fontSize: 18,
-              minHeight: 'auto',
-              padding: 4,
-            }}
-          >
-            🔔
-            {emergencyAlert && (
-              <span
-                className="absolute -top-1 -right-1"
-                style={{
-                  backgroundColor: '#dc2626',
-                  color: '#fff',
-                  width: 16,
-                  height: 16,
-                  borderRadius: '50%',
-                  fontSize: 9,
-                  fontWeight: 700,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-              >
-                2
-              </span>
-            )}
-          </button>
-
-          <div className="flex items-center gap-2">
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: '50%',
-                backgroundColor: '#36c9c5',
-                color: '#051414',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontWeight: 700,
-                fontSize: 13,
-              }}
-            >
-              {(userEmail ?? '?').charAt(0).toUpperCase()}
-            </div>
-            <span style={{ color: '#86dfdc', fontSize: 13 }}>{userEmail}</span>
-          </div>
-
-          <button
-            onClick={() => {
-              logout();
-              router.replace('/login');
-            }}
-            style={{
-              color: '#207976',
-              fontSize: 12,
-              background: 'none',
-              border: 'none',
-              cursor: 'pointer',
-            }}
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
-
-      {/* ── Master / Detail body ───────────────────────────────── */}
-      <div className="flex" style={{ height: 'calc(100vh - 48px)' }}>
+      {/* ── Master / Detail body ───────────────────────────── */}
+      <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
-        <aside
-          className="flex flex-col"
-          style={{
-            width: 240,
-            backgroundColor: '#071c1c',
-            borderRight: '1px solid #155150',
-          }}
-        >
-          <div
-            className="flex items-center justify-between px-4 py-3"
-            style={{ borderBottom: '1px solid rgba(21,81,80,0.5)' }}
-          >
-            <div className="flex items-center gap-2">
-              <span style={{ color: '#f0fffe', fontSize: 13, fontWeight: 700 }}>Active Patients</span>
-              <span style={{ width: 20, height: 20, borderRadius: '50%', backgroundColor: '#36c9c5', color: '#051414', fontSize: 10, fontWeight: 800, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{queue.length}</span>
-            </div>
-          </div>
-          <div className="px-3 py-2" style={{ borderBottom: '1px solid rgba(21,81,80,0.5)' }}>
-            <select
-              value={sortKey}
-              onChange={(e) => setSortKey(e.target.value as SortKey)}
-              style={{
-                width: '100%',
-                padding: '6px 10px',
-                borderRadius: 8,
-                backgroundColor: 'transparent',
-                border: '1px solid #155150',
-                color: '#36c9c5',
-                fontSize: 11,
-                outline: 'none',
-                minHeight: 'auto',
-              }}
-            >
-              <option value="priority">↕ Sort by Priority</option>
-              <option value="wait">↕ Sort by Wait time</option>
-              <option value="arrived">↕ Sort by Newest</option>
-            </select>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
-            {sorted.length === 0 ? (
-              <div className="text-center py-12" style={{ color: '#207976', fontSize: 13 }}>
-                No patients in queue
-              </div>
-            ) : (
-              sorted.map((s) => (
-                <PatientListCard
-                  key={s.id}
-                  session={s}
-                  selected={s.id === caseParam}
-                  onClick={() => selectCase(s.id)}
-                />
-              ))
-            )}
-          </div>
-        </aside>
+        <QueuePanel
+          queue={queue}
+          selectedCaseId={caseParam}
+          onSelectCase={selectCase}
+        />
 
         {/* Main panel */}
         <main className="flex-1 overflow-y-auto">
           {caseLoading ? (
-            <div className="h-full flex items-center justify-center">
+            <div className="flex h-full items-center justify-center">
               <LoadingSpinner size="lg" />
             </div>
           ) : caseDetail ? (
@@ -366,10 +162,7 @@ function DashboardInner() {
               onMarkSeen={handleMarkSeen}
             />
           ) : (
-            <div
-              className="h-full flex items-center justify-center"
-              style={{ color: '#207976', fontSize: 14 }}
-            >
+            <div className="flex h-full items-center justify-center text-sm text-text-dim">
               Select a patient to view case details
             </div>
           )}
@@ -386,7 +179,7 @@ function DashboardInner() {
           onDismiss={clearEmergencyAlert}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -715,19 +508,7 @@ function VitalsView({ measurements }: { measurements: DeviceMeasurement[] }) {
 // Session Timeline (compact, for Summary tab)
 // ─────────────────────────────────────────────────────────────
 
-const TIMELINE_DOT_COLORS: Record<string, string> = {
-  SESSION_START: '#3b82f6',
-  CONSENT_GIVEN: '#22c55e',
-  DEVICE_READ: '#22c55e',
-  CTAS_SCORED: '#eab308',
-  ALARM_TRIGGERED: '#dc2626',
-  AVATAR_SESSION_CREATED: '#36c9c5',
-  AVATAR_SESSION_CLOSED: '#207976',
-  FIRST_LOOK: '#22c55e',
-  COMPLAINT: '#ea580c',
-  SEVERITY: '#eab308',
-  RED_FLAG: '#dc2626',
-};
+
 
 function TimelineView({ events }: { events: AuditEvent[] }) {
   return (

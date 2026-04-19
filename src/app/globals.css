@@ -5,6 +5,19 @@
   /* BRAND PALETTE — Teal Design System                  */
   /* ═══════════════════════════════════════════════════ */
 
+  /* Light Sea Green scale */
+  --color-lsg-50: #e6fefd;
+  --color-lsg-100: #cefdfc;
+  --color-lsg-200: #9dfbf8;
+  --color-lsg-300: #6bfaf5;
+  --color-lsg-400: #3af8f2;
+  --color-lsg-500: #09f6ee;
+  --color-lsg-600: #07c5bf;
+  --color-lsg-700: #05948f;
+  --color-lsg-800: #04625f;
+  --color-lsg-900: #023130;
+  --color-lsg-950: #012221;
+
   /* Strong Cyan scale */
   --color-sc-50: #ebfaf9;
   --color-sc-100: #d7f4f3;
@@ -19,9 +32,30 @@
   --color-sc-950: #071c1c;
 
   /* Pearl Aqua scale */
+  --color-pa-50: #ebfafa;
+  --color-pa-100: #d6f5f4;
+  --color-pa-200: #aeeae9;
+  --color-pa-300: #85e0de;
   --color-pa-400: #5dd5d3;
+  --color-pa-500: #34cbc8;
   --color-pa-600: #2aa2a0;
+  --color-pa-700: #1f7a78;
   --color-pa-800: #155150;
+  --color-pa-900: #0a2928;
+  --color-pa-950: #071c1c;
+
+  /* Icy Aqua scale */
+  --color-ia-50: #e5fffc;
+  --color-ia-100: #ccfffa;
+  --color-ia-200: #99fff5;
+  --color-ia-300: #66fff0;
+  --color-ia-400: #33ffeb;
+  --color-ia-500: #00ffe6;
+  --color-ia-600: #00ccb8;
+  --color-ia-700: #00998a;
+  --color-ia-800: #00665c;
+  --color-ia-900: #00332e;
+  --color-ia-950: #002420;
 
   /* Semantic backgrounds */
   --color-dash-bg: #051414;
@@ -31,6 +65,13 @@
 
   /* Semantic borders */
   --color-dash-border: #155150;
+  --color-dash-border-bright: #5dd5d3;
+
+  /* Semantic text */
+  --color-text-primary: #f0fffe;
+  --color-text-secondary: #86dfdc;
+  --color-text-muted: #2aa2a0;
+  --color-text-dim: #207976;
 
   /* CTAS urgency */
   --color-ctas-1: #dc2626;
