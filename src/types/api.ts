@@ -4,9 +4,9 @@ export interface TriageSession {
   ctas_level: 1 | 2 | 3 | 4 | 5 | null;
   akool_session_id: string | null;
   avatar_mode: 'NURSE' | 'DOCTOR';
-  red_flags: string[];
+  red_flags: string[] | null;
   reasoning_summary: string | null;
-  answers: TriageAnswer[];
+  answers?: TriageAnswer[];
   measurements?: DeviceMeasurement[];
   audit_events?: AuditEvent[];
   created_at: string;

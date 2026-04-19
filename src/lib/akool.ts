@@ -27,6 +27,10 @@ export class AKOOLAvatarManager {
 
   constructor(options: AvatarManagerOptions) {
     this.options = options;
+    // Tear down any previous session before claiming the singleton slot
+    if (_instance && _instance !== this) {
+      _instance.destroy().catch(() => {});
+    }
     _instance = this;
   }
 
@@ -172,7 +176,8 @@ export class AKOOLAvatarManager {
       console.log('[AKOOL] user-unpublished:', user.uid, mediaType);
     });
 
-    await this.client.join(appId, channel, token || null, uid);
+    // uid=null → Agora auto-assigns a random UID, avoids UID_CONFLICT on hot-reload
+    await this.client.join(appId, channel, token || null, null);
     console.log('[AKOOL] Joined Agora channel. Remote users already in channel:', this.client.remoteUsers.map(u => u.uid));
     // createDataStream does not exist in Agora Web SDK v4.x — speak() uses AKOOL REST API instead
   }

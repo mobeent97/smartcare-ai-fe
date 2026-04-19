@@ -1,24 +1,48 @@
 @import "tailwindcss";
 
 @theme inline {
-  /* Brand palette */
-  --color-primary: #36c9c5;
-  --color-primary-light: #09f6ee;
-  --color-primary-pearl: #34cbc8;
-  --color-primary-icy: #00ffe6;
+  /* ═══════════════════════════════════════════════════ */
+  /* BRAND PALETTE — Teal Design System                  */
+  /* ═══════════════════════════════════════════════════ */
 
-  /* Backgrounds */
-  --color-bg: #0a0f1e;
-  --color-surface: #111827;
-  --color-surface-raised: #1f2937;
-  --color-border: #374151;
+  /* Strong Cyan scale */
+  --color-sc-50: #ebfaf9;
+  --color-sc-100: #d7f4f3;
+  --color-sc-200: #aeeae8;
+  --color-sc-300: #86dfdc;
+  --color-sc-400: #5ed4d0;
+  --color-sc-500: #36c9c5;
+  --color-sc-600: #2ba19d;
+  --color-sc-700: #207976;
+  --color-sc-800: #15514f;
+  --color-sc-900: #0b2827;
+  --color-sc-950: #071c1c;
 
-  /* CTAS urgency levels */
+  /* Pearl Aqua scale */
+  --color-pa-400: #5dd5d3;
+  --color-pa-600: #2aa2a0;
+  --color-pa-800: #155150;
+
+  /* Semantic backgrounds */
+  --color-dash-bg: #051414;
+  --color-dash-surface: #071c1c;
+  --color-dash-card: #0b2827;
+  --color-dash-raised: #0d3635;
+
+  /* Semantic borders */
+  --color-dash-border: #155150;
+
+  /* CTAS urgency */
   --color-ctas-1: #dc2626;
   --color-ctas-2: #ea580c;
-  --color-ctas-3: #ca8a04;
-  --color-ctas-4: #16a34a;
-  --color-ctas-5: #2563eb;
+  --color-ctas-3: #eab308;
+  --color-ctas-4: #22c55e;
+  --color-ctas-5: #3b82f6;
+
+  /* Status */
+  --color-success: #22c55e;
+  --color-warning: #eab308;
+  --color-danger: #dc2626;
 
   /* Typography */
   --font-sans: 'Inter', sans-serif;
@@ -30,8 +54,8 @@
 }
 
 body {
-  background-color: #0a0f1e;
-  color: #f9fafb;
+  background-color: #051414;
+  color: #f0fffe;
   font-family: 'Inter', sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -40,10 +64,30 @@ body {
   box-sizing: border-box;
 }
 
-/* Kiosk touch targets — all buttons minimum 48px tall */
-button {
+/* Kiosk touch targets — booth only */
+.booth-kiosk button {
   min-height: 48px;
   cursor: pointer;
+}
+
+/* Dashboard buttons — normal sizing */
+button {
+  cursor: pointer;
+}
+
+/* Scrollbar for dark teal theme */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #071c1c;
+}
+::-webkit-scrollbar-thumb {
+  background: #155150;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #207976;
 }
 
 /* Avatar glow ring */
@@ -51,12 +95,11 @@ button {
   box-shadow: 0 0 32px 4px rgba(0, 255, 230, 0.25);
 }
 
-/* CTAS pulse animation for emergency overlay */
+/* CTAS pulse animation */
 @keyframes ctas-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.75; }
 }
-
 .ctas-pulse {
   animation: ctas-pulse 1.2s ease-in-out infinite;
 }
@@ -65,7 +108,13 @@ button {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
-
 .spinner {
   animation: spin 1s linear infinite;
 }
+
+/* Dashboard card left-border accent for CTAS levels */
+.ctas-accent-1 { border-left: 3px solid #dc2626; }
+.ctas-accent-2 { border-left: 3px solid #ea580c; }
+.ctas-accent-3 { border-left: 3px solid #eab308; }
+.ctas-accent-4 { border-left: 3px solid #22c55e; }
+.ctas-accent-5 { border-left: 3px solid #3b82f6; }
