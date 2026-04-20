@@ -39,14 +39,14 @@ export function QueuePanel({
   const sorted = useMemo(() => sortPatients(queue, sortKey), [queue, sortKey]);
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-dash-border bg-dash-surface">
+    <aside className="flex w-80 shrink-0 flex-col border-r border-dash-border bg-dash-surface">
       {/* ── Header ─────────────────────────────────────── */}
       <div className="flex items-center justify-between border-b border-dash-border/50 px-4 py-3">
         <div className="flex items-center gap-2">
-          <span className="text-[13px] font-bold text-text-primary">
+          <span className="text-[15px] font-bold text-text-primary">
             Active Patients
           </span>
-          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-sc-500 text-[10px] font-extrabold text-dash-bg">
+          <span className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-full bg-danger text-[10px] font-bold text-white">
             {queue.length}
           </span>
         </div>

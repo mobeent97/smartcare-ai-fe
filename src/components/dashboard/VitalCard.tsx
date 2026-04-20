@@ -1,7 +1,9 @@
+import React from 'react';
+
 interface Props {
   label: string;
-  icon: string;
-  value: string;
+  icon: React.ReactNode;
+  value: string | React.ReactNode;
   unit: string;
   classification: string;
   tone: 'green' | 'amber' | 'orange' | 'red' | 'muted';
@@ -10,103 +12,82 @@ interface Props {
   refLabel?: string;
 }
 
-const TONE: Record<Props['tone'], { fg: string; bg: string; bar: string; barTrack: string }> = {
-  green: { fg: '#22c55e', bg: 'rgba(34,197,94,0.15)', bar: '#22c55e', barTrack: '#0b2827' },
-  amber: { fg: '#eab308', bg: 'rgba(234,179,8,0.15)', bar: '#eab308', barTrack: '#0b2827' },
-  orange: { fg: '#ea580c', bg: 'rgba(234,88,12,0.15)', bar: '#ea580c', barTrack: '#0b2827' },
-  red: { fg: '#dc2626', bg: 'rgba(220,38,38,0.15)', bar: '#dc2626', barTrack: '#0b2827' },
-  muted: { fg: '#2aa2a0', bg: 'rgba(21,81,80,0.3)', bar: '#155150', barTrack: '#0b2827' },
+const TONE_CLASSES: Record<Props['tone'], { badge: string; bar: string; border: string }> = {
+  green: { badge: 'border-success text-success', bar: 'bg-success', border: 'border-l-success' },
+  amber: { badge: 'border-warning text-warning', bar: 'bg-warning', border: 'border-l-warning' },
+  orange: { badge: 'border-orange-600 text-orange-500', bar: 'bg-orange-500', border: 'border-l-orange-500' },
+  red: { badge: 'border-danger text-danger', bar: 'bg-danger', border: 'border-l-danger' },
+  muted: { badge: 'border-dash-border text-dash-border', bar: 'bg-dash-border', border: 'border-l-dash-border' },
 };
 
 export function VitalCard({ label, icon, value, unit, classification, tone, fillPct, refLabel }: Props) {
-  const t = TONE[tone];
+  const t = TONE_CLASSES[tone];
+  
+  // Custom render for unpopulated missing data matching figma
+  const displayValue = value === '—' ? (
+    <div className="h-[4px] w-6 rounded-full bg-white relative top-2.5"></div>
+  ) : (
+    value
+  );
+
   return (
-    <div
-      style={{
-        backgroundColor: '#0b2827',
-        border: '1px solid #155150',
-        borderRadius: 12,
-        padding: '20px 24px',
-      }}
-    >
-      {/* Header: icon + label */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 16 }}>
-        <span style={{ fontSize: 16, color: '#36c9c5' }}>{icon}</span>
-        <span
-          style={{
-            color: '#36c9c5',
-            fontSize: 11,
-            fontWeight: 700,
-            letterSpacing: '0.08em',
-            textTransform: 'uppercase',
-          }}
-        >
-          {label}
-        </span>
+    <div className={`flex flex-col justify-between overflow-hidden rounded-xl border border-dash-border border-l-[4px] bg-dash-card p-5 lg:px-6 ${t.border}`}>
+      <div>
+        {/* Header: icon + label */}
+        <div className="mb-4 flex items-center gap-2">
+          <span className="flex items-center justify-center h-5 w-5">{icon}</span>
+          <span className="text-[13px] uppercase tracking-[0.08em] text-sc-500">
+            {label}
+          </span>
+        </div>
+
+        {/* Value + unit */}
+        <div className="mb-6 flex items-baseline gap-2 min-h-[36px]">
+          <span className="font-mono text-[36px] font-bold leading-none text-text-primary">
+            {displayValue}
+          </span>
+          {unit && (
+            <span className="text-sm font-medium text-text-muted">
+              {unit}
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Value + unit */}
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 12 }}>
-        <span
-          style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 36,
-            fontWeight: 700,
-            color: '#f0fffe',
-            lineHeight: 1,
-          }}
-        >
-          {value}
-        </span>
-        {unit && (
-          <span style={{ color: '#2aa2a0', fontSize: 14, fontWeight: 500 }}>
-            {unit}
-          </span>
+      <div>
+        {/* Classification badge */}
+        <div className="mb-4 flex">
+          {classification === '—' ? (
+            <span className={`flex h-6 w-6 items-center justify-center rounded-full border bg-transparent ${t.badge}`}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+              </svg>
+            </span>
+          ) : (
+            <span className={`rounded-full border px-3 py-[3px] text-xs font-semibold bg-transparent ${t.badge}`}>
+              {classification}
+            </span>
+          )}
+        </div>
+
+        {/* Progress bar */}
+        {fillPct !== null && (
+          <div className="h-[3px] w-full overflow-hidden rounded-full bg-dash-bg">
+            <div
+              className={`h-full rounded-full transition-all duration-500 ${t.bar}`}
+              style={{ width: `${Math.max(2, Math.min(100, fillPct))}%` }}
+            />
+          </div>
+        )}
+
+        {refLabel && (
+          <p className="mt-2 text-[10px] text-dash-border">
+            {refLabel}
+          </p>
         )}
       </div>
-
-      {/* Classification badge */}
-      <div style={{ marginBottom: 16 }}>
-        <span
-          style={{
-            backgroundColor: t.bg,
-            color: t.fg,
-            border: `1px solid ${t.fg}`,
-            padding: '3px 10px',
-            borderRadius: 6,
-            fontSize: 11,
-            fontWeight: 600,
-          }}
-        >
-          {classification}
-        </span>
-      </div>
-
-      {/* Progress bar */}
-      {fillPct !== null && (
-        <div
-          style={{
-            height: 4,
-            backgroundColor: t.barTrack,
-            borderRadius: 2,
-            overflow: 'hidden',
-          }}
-        >
-          <div
-            style={{
-              width: `${Math.max(2, Math.min(100, fillPct))}%`,
-              height: '100%',
-              backgroundColor: t.bar,
-              borderRadius: 2,
-              transition: 'width 0.6s ease',
-            }}
-          />
-        </div>
-      )}
-
-      {refLabel && (
-        <p style={{ color: '#155150', fontSize: 10, marginTop: 8 }}>{refLabel}</p>
-      )}
     </div>
   );
 }
+
+

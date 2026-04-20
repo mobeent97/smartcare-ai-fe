@@ -30,15 +30,15 @@ export function statusPill(session: TriageSession): {
 } {
   const flags = session.red_flags ?? [];
   if (flags.length > 0) {
-    return { text: 'Red Flag', icon: '●', color: 'text-ctas-1' };
+    return { text: 'Red Flag', icon: '🔴', color: 'text-danger' };
   }
   if (session.status === 'COMPLETED') {
-    return { text: 'Routed', icon: '✓', color: 'text-success' };
+    return { text: 'Routed', icon: '✅', color: 'text-success' };
   }
   if (session.ctas_level) {
-    return { text: 'In Assessment', icon: '▪', color: 'text-warning' };
+    return { text: 'In Assessment', icon: '📊', color: 'text-sc-500' };
   }
-  return { text: 'Waiting', icon: '◷', color: 'text-text-muted' };
+  return { text: 'Waiting', icon: '⏳', color: 'text-sc-500' };
 }
 
 /* ─── First complaint from answers ────────────────────────── */
@@ -53,11 +53,11 @@ export function firstComplaint(session: TriageSession): string {
 
 /* ─── CTAS accent color class ─────────────────────────────── */
 export const CTAS_ACCENT_CLASS: Record<number, string> = {
-  1: 'border-l-ctas-1',
-  2: 'border-l-ctas-2',
-  3: 'border-l-ctas-3',
-  4: 'border-l-ctas-4',
-  5: 'border-l-ctas-5',
+  1: 'border-ctas-1',
+  2: 'border-ctas-2',
+  3: 'border-ctas-3',
+  4: 'border-ctas-4',
+  5: 'border-ctas-5',
 };
 
 /* ─── Step labels for answers tab ─────────────────────────── */
@@ -77,8 +77,31 @@ export function classifyBp(systolic?: number): {
   if (systolic < 120) return { label: 'Normal', tone: 'green' };
   if (systolic < 130) return { label: 'Elevated', tone: 'amber' };
   if (systolic < 140) return { label: 'Stage 1 HTN', tone: 'orange' };
-  if (systolic < 180) return { label: 'Stage 2 HTN', tone: 'red' };
+  if (systolic < 180) return { label: 'Stage 2 Hypertension', tone: 'orange' };
   return { label: 'Hypertensive Crisis', tone: 'red' };
+}
+
+/* ─── Heart Rate classification ───────────────────────────── */
+export function classifyHr(bpm?: number): {
+  label: string;
+  tone: 'green' | 'amber' | 'orange' | 'red' | 'muted';
+} {
+  if (bpm == null) return { label: '—', tone: 'muted' };
+  if (bpm < 50) return { label: 'Low', tone: 'orange' };
+  if (bpm > 110) return { label: 'Tachycardia', tone: 'red' };
+  if (bpm >= 90) return { label: 'Elevated', tone: 'orange' };
+  return { label: 'Normal', tone: 'green' };
+}
+
+/* ─── SPO2 classification ─────────────────────────────────── */
+export function classifySpo2(spo2?: number): {
+  label: string;
+  tone: 'green' | 'amber' | 'orange' | 'red' | 'muted';
+} {
+  if (spo2 == null) return { label: '—', tone: 'muted' };
+  if (spo2 < 90) return { label: 'Critical', tone: 'red' };
+  if (spo2 < 95) return { label: 'Low', tone: 'amber' };
+  return { label: 'Normal', tone: 'green' };
 }
 
 /* ─── Temperature classification ──────────────────────────── */

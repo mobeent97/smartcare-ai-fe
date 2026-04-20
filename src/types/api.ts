@@ -23,7 +23,7 @@ export interface TriageAnswer {
 
 export interface DeviceMeasurement {
   id: string;
-  device_type: 'BLOOD_PRESSURE' | 'TEMPERATURE';
+  device_type: 'BLOOD_PRESSURE' | 'TEMPERATURE' | 'OXIMETER';
   raw_readings: Record<string, number>;
   classification: string;
   timestamp: string;

@@ -11,57 +11,44 @@ interface Props {
 
 export function EmergencyAlertModal({ alert, onView, onDismiss }: Props) {
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center z-50"
-      style={{ backgroundColor: 'rgba(0,0,0,0.8)' }}
-    >
-      <div
-        className="rounded-2xl p-8 max-w-md w-full mx-4 ctas-pulse"
-        style={{ backgroundColor: '#1f2937', border: '3px solid #dc2626' }}
-      >
-        <div className="text-center mb-4">
-          <span style={{ fontSize: 40 }}>🚨</span>
-          <h2 style={{ fontSize: 24, fontWeight: 800, color: '#dc2626', marginTop: 8 }}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80">
+      <div className="ctas-pulse mx-4 w-full max-w-md rounded-2xl border-[3px] border-danger bg-dash-card p-8">
+        <div className="mb-4 text-center">
+          <span className="text-[40px]">🚨</span>
+          <h2 className="mt-2 text-2xl font-extrabold text-danger">
             CTAS 1 EMERGENCY
           </h2>
         </div>
-        <p style={{ color: '#f9fafb', fontSize: 15, textAlign: 'center', marginBottom: 8 }}>
+        <p className="mb-2 text-center text-[15px] text-text-primary">
           Patient requires immediate resuscitation
         </p>
-        <p style={{ color: '#9ca3af', fontSize: 13, textAlign: 'center', marginBottom: 4 }}>
+        <p className="mb-1 text-center text-[13px] text-text-muted">
           Session: #{alert.sessionId.slice(-6).toUpperCase()}
         </p>
+        
         {alert.redFlags.length > 0 && (
-          <div className="flex flex-wrap gap-2 justify-center my-4">
+          <div className="my-4 flex flex-wrap justify-center gap-2">
             {alert.redFlags.map((flag) => (
               <span
                 key={flag}
-                style={{
-                  backgroundColor: 'rgba(220,38,38,0.2)',
-                  border: '1px solid rgba(220,38,38,0.5)',
-                  color: '#fca5a5',
-                  padding: '2px 10px',
-                  borderRadius: 9999,
-                  fontSize: 12,
-                }}
+                className="rounded-full border border-danger/50 bg-danger/20 px-2.5 py-0.5 text-xs text-danger brightness-150"
               >
                 {flag}
               </span>
             ))}
           </div>
         )}
-        <div className="flex gap-3 mt-6">
+        
+        <div className="mt-6 flex gap-3">
           <button
             onClick={onView}
-            className="flex-1 rounded-xl font-bold"
-            style={{ backgroundColor: '#dc2626', color: '#fff', padding: '12px 0', border: 'none', fontSize: 15 }}
+            className="flex-1 rounded-xl bg-danger py-3 text-[15px] font-bold text-white transition-colors hover:bg-danger/80"
           >
             View Patient
           </button>
           <button
             onClick={onDismiss}
-            className="flex-1 rounded-xl font-bold"
-            style={{ backgroundColor: '#1f2937', color: '#9ca3af', padding: '12px 0', border: '1px solid #374151', fontSize: 15 }}
+            className="flex-1 rounded-xl border border-dash-border bg-dash-bg py-3 text-[15px] font-bold text-text-muted transition-colors hover:border-sc-700 hover:text-sc-400"
           >
             Dismiss
           </button>
@@ -70,3 +57,4 @@ export function EmergencyAlertModal({ alert, onView, onDismiss }: Props) {
     </div>
   );
 }
+
