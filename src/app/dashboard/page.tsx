@@ -45,7 +45,7 @@ function DashboardInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const caseParam = searchParams.get('case');
-  const { accessToken } = useAuthStore();
+  const { accessToken, _hasHydrated } = useAuthStore();
   const { queue, setQueue, updateQueueItem, emergencyAlert, setEmergencyAlert, clearEmergencyAlert } =
     useDashboardStore();
 
@@ -57,6 +57,7 @@ function DashboardInner() {
   const [actionLoading, setActionLoading] = useState(false);
 
   useEffect(() => {
+    if (!_hasHydrated) return; // wait for localStorage to be read
     if (!accessToken) {
       router.replace('/login');
       return;
@@ -77,7 +78,7 @@ function DashboardInner() {
     );
     ws.connect();
     return () => ws.disconnect();
-  }, [accessToken, router, setQueue, updateQueueItem, setEmergencyAlert]);
+  }, [_hasHydrated, accessToken, router, setQueue, updateQueueItem, setEmergencyAlert]);
 
   useEffect(() => {
     if (!caseParam || !accessToken) {
@@ -131,6 +132,7 @@ function DashboardInner() {
     }
   }
 
+  if (!_hasHydrated) return null; // silent blank until store is ready
   if (!accessToken) return null;
 
   return (

@@ -11,14 +11,14 @@ export function VitalsPanel({ measurements }: VitalsPanelProps) {
   const temp = measurements.find((m) => m.device_type === 'TEMPERATURE');
   const oximeter = measurements.find((m) => m.device_type === 'OXIMETER');
 
-  const systolic = bp?.raw_readings?.systolic;
-  const diastolic = bp?.raw_readings?.diastolic;
-  const tempF = temp?.raw_readings?.temperature ?? temp?.raw_readings?.value;
-  const hr = oximeter?.raw_readings?.heart_rate ?? bp?.raw_readings?.heart_rate;
-  const spo2 = oximeter?.raw_readings?.spo2;
+  const systolic = bp?.raw_readings?.systolic as number | undefined;
+  const diastolic = bp?.raw_readings?.diastolic as number | undefined;
+  const tempC = (temp?.raw_readings?.temperature ?? temp?.raw_readings?.value) as number | undefined;
+  const hr = (oximeter?.raw_readings?.heart_rate ?? bp?.raw_readings?.heart_rate) as number | undefined;
+  const spo2 = (oximeter?.raw_readings?.spo2) as number | undefined;
 
   const sysCls = classifyBp(systolic);
-  const tempCls = classifyTemp(tempF);
+  const tempCls = classifyTemp(tempC);
   const hrCls = classifyHr(hr);
   const spo2Cls = classifySpo2(spo2);
 
@@ -77,11 +77,11 @@ export function VitalsPanel({ measurements }: VitalsPanelProps) {
       <VitalCard
         label="Temperature"
         icon={TempIcon}
-        value={tempF != null ? `${tempF}` : '—'}
+        value={tempC != null ? `${tempC}` : '—'}
         unit="°C"
         classification={temp?.classification ?? tempCls.label}
         tone={tempCls.tone}
-        fillPct={tempF != null ? ((tempF - 95) / (104 - 95)) * 100 : null}
+        fillPct={tempC != null ? ((tempC - 35) / (41 - 35)) * 100 : null}
       />
       <VitalCard
         label="Heart Rate"

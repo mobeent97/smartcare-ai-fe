@@ -74,7 +74,7 @@ class ApiClient {
   }
 
   // Devices
-  async triggerMeasurement(sessionId: string, deviceType: 'BLOOD_PRESSURE' | 'TEMPERATURE') {
+  async triggerMeasurement(sessionId: string, deviceType: 'BLOOD_PRESSURE' | 'TEMPERATURE' | 'OXIMETER') {
     const res = await this.client.post<ApiResponse<DeviceMeasurement>>('/devices/measure/', {
       session_id: sessionId,
       device_type: deviceType,
@@ -98,6 +98,11 @@ class ApiClient {
       action_type: actionType,
       ...payload,
     });
+    return res.data;
+  }
+
+  async deleteCase(caseId: string) {
+    const res = await this.client.delete(`/dashboard/cases/${caseId}/delete/`);
     return res.data;
   }
 }

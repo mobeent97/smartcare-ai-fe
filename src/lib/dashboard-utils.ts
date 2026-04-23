@@ -104,16 +104,16 @@ export function classifySpo2(spo2?: number): {
   return { label: 'Normal', tone: 'green' };
 }
 
-/* ─── Temperature classification ──────────────────────────── */
-export function classifyTemp(f?: number): {
+/* ─── Temperature classification (Celsius) ────────────────── */
+export function classifyTemp(c?: number): {
   label: string;
   tone: 'green' | 'amber' | 'orange' | 'red' | 'muted';
 } {
-  if (f == null) return { label: '—', tone: 'muted' };
-  if (f < 97) return { label: 'Hypothermia', tone: 'amber' };
-  if (f < 99.5) return { label: 'Normal', tone: 'green' };
-  if (f < 100.9) return { label: 'Low-grade Fever', tone: 'amber' };
-  if (f < 103) return { label: 'Fever', tone: 'orange' };
+  if (c == null) return { label: '—', tone: 'muted' };
+  if (c < 35.0) return { label: 'Hypothermia', tone: 'amber' };
+  if (c < 37.5) return { label: 'Normal', tone: 'green' };
+  if (c < 38.0) return { label: 'Low-grade Fever', tone: 'amber' };
+  if (c < 39.0) return { label: 'Fever', tone: 'orange' };
   return { label: 'High Fever', tone: 'red' };
 }
 

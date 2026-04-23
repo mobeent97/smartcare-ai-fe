@@ -1,4 +1,5 @@
 import type { TriageSession } from '@/types/api';
+import { CustomSelect } from '@/components/ui/CustomSelect';
 
 interface ActionPanelProps {
   session: TriageSession;
@@ -57,17 +58,12 @@ export function ActionPanel({
       {/* Override panel (expandable) */}
       {overrideLevel && (
         <div className="flex flex-wrap items-center gap-2.5">
-          <select
+          <CustomSelect
             value={overrideLevel}
-            onChange={(e) => setOverrideLevel(e.target.value)}
-            className="rounded-lg border border-dash-border bg-dash-raised px-3 py-2 text-xs text-text-primary outline-none"
-          >
-            {[1, 2, 3, 4, 5].map((l) => (
-              <option key={l} value={l}>
-                CTAS {l}
-              </option>
-            ))}
-          </select>
+            onChange={(val) => setOverrideLevel(val)}
+            options={[1, 2, 3, 4, 5].map((l) => ({ value: String(l), label: `CTAS ${l}` }))}
+            className="w-32"
+          />
           <input
             value={overrideReason}
             onChange={(e) => setOverrideReason(e.target.value)}

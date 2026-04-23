@@ -159,3 +159,66 @@ button {
 .ctas-accent-3 { border-left: 3px solid #eab308; }
 .ctas-accent-4 { border-left: 3px solid #22c55e; }
 .ctas-accent-5 { border-left: 3px solid #3b82f6; }
+
+/* ─── Page transition animations (View Transitions API) ─── */
+
+/* Expand: navigate forward (dashboard → case detail) */
+html[data-transition='forward']::view-transition-old(root) {
+  animation: vt-slide-out-left 280ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+html[data-transition='forward']::view-transition-new(root) {
+  animation: vt-slide-in-right 280ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Back: navigate back (case detail → dashboard) */
+html[data-transition='back']::view-transition-old(root) {
+  animation: vt-slide-out-right 280ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+html[data-transition='back']::view-transition-new(root) {
+  animation: vt-slide-in-left 280ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes vt-slide-out-left {
+  to {
+    transform: translateX(-28px);
+    opacity: 0;
+  }
+}
+@keyframes vt-slide-in-right {
+  from {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+}
+@keyframes vt-slide-out-right {
+  to {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+}
+@keyframes vt-slide-in-left {
+  from {
+    transform: translateX(-28px);
+    opacity: 0;
+  }
+}
+
+/* CTAS-1 emergency glow for queue cards */
+@keyframes ctas1-glow {
+  0%, 100% {
+    box-shadow:
+      0 0 8px 0 rgba(220, 38, 38, 0.3),
+      0 0 20px -2px rgba(220, 38, 38, 0.15),
+      inset 0 0 12px -4px rgba(220, 38, 38, 0.08);
+  }
+  50% {
+    box-shadow:
+      0 0 14px 2px rgba(220, 38, 38, 0.45),
+      0 0 32px -2px rgba(220, 38, 38, 0.2),
+      inset 0 0 18px -4px rgba(220, 38, 38, 0.12);
+  }
+}
+.ctas-1-glow {
+  animation: ctas1-glow 2s ease-in-out infinite;
+  border-color: rgba(220, 38, 38, 0.6) !important;
+}

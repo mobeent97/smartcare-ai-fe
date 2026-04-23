@@ -84,15 +84,8 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
           )}
         </button>
 
-        {/* User avatar + name (Click to logout) */}
-        <button
-          onClick={() => {
-            logout();
-            router.replace('/login');
-          }}
-          className="flex items-center gap-3 transition-opacity hover:opacity-80"
-          title="Sign out"
-        >
+        {/* User avatar + name */}
+        <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-full bg-sc-400 text-dash-bg">
             <svg
               width="14"
@@ -111,6 +104,31 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
           <span className="text-sm font-normal text-text-primary">
             {displayName}
           </span>
+        </div>
+
+        {/* Sign Out */}
+        <button
+          onClick={() => {
+            logout();
+            router.replace('/login');
+          }}
+          className="flex items-center gap-1.5 rounded-lg border border-dash-border px-3 py-1.5 text-xs font-semibold text-text-dim transition-colors hover:border-danger/50 hover:text-danger"
+        >
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+          Sign Out
         </button>
       </div>
     </header>

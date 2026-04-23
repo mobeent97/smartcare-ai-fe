@@ -3,6 +3,7 @@
 import { PatientListCard } from '@/components/dashboard/PatientListCard';
 import { priorityScore } from '@/lib/dashboard-utils';
 import type { TriageSession } from '@/types/api';
+import { CustomSelect } from '@/components/ui/CustomSelect';
 import { useState, useMemo } from 'react';
 
 type SortKey = 'priority' | 'arrived' | 'wait';
@@ -54,15 +55,15 @@ export function QueuePanel({
 
       {/* ── Sort selector ──────────────────────────────── */}
       <div className="border-b border-dash-border/50 px-3 py-2">
-        <select
+        <CustomSelect
           value={sortKey}
-          onChange={(e) => setSortKey(e.target.value as SortKey)}
-          className="w-full rounded-lg border border-dash-border bg-transparent px-2.5 py-1.5 text-[11px] text-sc-500 outline-none"
-        >
-          <option value="priority">↕ Sort by Priority</option>
-          <option value="wait">↕ Sort by Wait time</option>
-          <option value="arrived">↕ Sort by Newest</option>
-        </select>
+          onChange={(val) => setSortKey(val as SortKey)}
+          options={[
+            { value: 'priority', label: '↕ Sort by Priority' },
+            { value: 'wait', label: '↕ Sort by Wait time' },
+            { value: 'arrived', label: '↕ Sort by Newest' }
+          ]}
+        />
       </div>
 
       {/* ── Scrollable patient list ────────────────────── */}

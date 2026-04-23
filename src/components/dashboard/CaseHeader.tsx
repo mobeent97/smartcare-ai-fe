@@ -1,6 +1,9 @@
+'use client';
+
 import type { TriageSession } from '@/types/api';
 import { patientDisplayId } from '@/lib/dashboard-utils';
 import { CTASBadge } from './CTASBadge';
+import { useTransitionRouter } from '@/hooks/useTransitionRouter';
 
 interface CaseHeaderProps {
   session: TriageSession;
@@ -8,6 +11,7 @@ interface CaseHeaderProps {
 }
 
 export function CaseHeader({ session, complaint }: CaseHeaderProps) {
+  const { navigate } = useTransitionRouter();
   const flags = session.red_flags ?? [];
   const routingLabel = flags.some((f) => /cardiac|heart/i.test(f))
     ? 'Cardiac Emergency'
@@ -22,7 +26,7 @@ export function CaseHeader({ session, complaint }: CaseHeaderProps) {
 
       {/* CTAS badge */}
       {session.ctas_level && (
-        <CTASBadge level={session.ctas_level} size="sm" />
+        <CTASBadge level={session.ctas_level} size="sm" variant="outline" />
       )}
 
       {/* Chief complaint */}
@@ -42,7 +46,10 @@ export function CaseHeader({ session, complaint }: CaseHeaderProps) {
 
       {/* Expand button — right-aligned */}
       <div className="ml-auto">
-        <button className="flex items-center gap-1.5 rounded-lg border border-dash-border bg-transparent px-3.5 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-sc-500 hover:text-sc-400">
+        <button
+          onClick={() => navigate(`/dashboard/cases/${session.id}`, 'forward')}
+          className="flex items-center gap-1.5 rounded-lg border border-dash-border bg-transparent px-3.5 py-1.5 text-xs font-semibold text-text-secondary transition-colors hover:border-sc-500 hover:text-sc-400"
+        >
           <span className="text-xs">⤢</span> Expand
         </button>
       </div>
