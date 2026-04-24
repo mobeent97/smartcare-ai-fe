@@ -40,21 +40,17 @@ export function QueuePanel({
   const sorted = useMemo(() => sortPatients(queue, sortKey), [queue, sortKey]);
 
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-r border-dash-border bg-dash-surface">
+    <aside className="flex w-[312px] shrink-0 flex-col border-r border-dash-border bg-dash-surface">
       {/* ── Header ─────────────────────────────────────── */}
-      <div className="flex items-center justify-between border-b border-dash-border/50 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <span className="text-[15px] font-bold text-text-primary">
-            Active Patients
-          </span>
-          <span className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-full bg-danger text-[10px] font-bold text-white">
-            {queue.length}
-          </span>
-        </div>
+      <div className="flex items-center gap-2.5 border-b border-dash-border/50 px-5 py-4">
+        <span className="text-[14px] font-bold text-text-primary">Active Patients</span>
+        <span className="inline-flex min-w-[20px] items-center justify-center rounded-full bg-danger px-1.5 py-0.5 text-[10px] font-bold text-white">
+          {queue.length}
+        </span>
       </div>
 
       {/* ── Sort selector ──────────────────────────────── */}
-      <div className="border-b border-dash-border/50 px-3 py-2">
+      <div className="border-b border-dash-border/50 px-4 py-2.5">
         <CustomSelect
           value={sortKey}
           onChange={(val) => setSortKey(val as SortKey)}
@@ -67,7 +63,7 @@ export function QueuePanel({
       </div>
 
       {/* ── Scrollable patient list ────────────────────── */}
-      <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3">
+      <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3.5">
         {sorted.length === 0 ? (
           <div className="py-12 text-center text-[13px] text-text-dim">
             No patients in queue

@@ -8,8 +8,8 @@ export function TriageReasoning({ summary }: TriageReasoningProps) {
   const bullets = splitReasoning(summary);
 
   return (
-    <section className="rounded-xl border border-dash-border bg-dash-card p-5 lg:px-6">
-      <p className="mb-4 text-[11px] font-bold uppercase tracking-[0.08em] text-sc-500">
+    <section className="rounded-xl border border-dash-border bg-dash-card px-6 py-5">
+      <p className="mb-3 text-[13px] font-bold uppercase tracking-[0.05em] text-sc-500">
         Triage Reasoning
       </p>
       {bullets.length === 0 ? (
@@ -23,7 +23,7 @@ export function TriageReasoning({ summary }: TriageReasoningProps) {
               <span className="shrink-0 text-sm leading-relaxed text-sc-500">
                 ›
               </span>
-              <span className="text-[13px] leading-relaxed text-text-secondary">
+              <span className="text-[15px] leading-relaxed text-[#aeeae9]">
                 {b}
               </span>
             </div>

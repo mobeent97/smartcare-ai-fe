@@ -14,13 +14,13 @@ interface CaseDetailTabsProps {
 
 export function CaseDetailTabs({ activeTab, onTabChange }: CaseDetailTabsProps) {
   return (
-    <div className="flex border-b border-dash-border px-6">
+    <div className="flex border-b border-dash-border px-7">
       {TAB_ITEMS.map(({ key, label }) => (
         <button
           key={key}
           onClick={() => onTabChange(key)}
           className={`
-            min-h-11 border-b-2 px-4 py-3 text-sm font-semibold
+            min-h-11 border-b-2 px-5 py-3.5 text-[15px] font-semibold
             transition-colors
             ${
               activeTab === key

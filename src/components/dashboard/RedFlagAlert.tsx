@@ -3,41 +3,28 @@ interface RedFlagAlertProps {
 }
 
 export function RedFlagAlert({ flags }: RedFlagAlertProps) {
-  const hasChestPain = flags.some((f) => /chest|cardiac|pain/i.test(f));
+  if (flags.length === 0) return null;
 
-  if (flags.length === 0 && !hasChestPain) return null;
+  const primary = flags[0];
+  const rest = flags.slice(1);
 
   return (
-    <div className="flex flex-col gap-5">
-      {/* Chest-pain alert banner */}
-      {hasChestPain && (
-        <section className="flex items-center gap-2.5 rounded-[10px] border border-danger/35 bg-danger/10 px-5 py-3">
-          <span className="text-base">⚠️</span>
-          <span className="text-sm">🚨</span>
-          <span className="text-[13px] font-semibold text-danger brightness-150">
-            Active Chest Pain — cardiac protocol engaged
-          </span>
-        </section>
-      )}
-
-      {/* Red flags */}
-      {flags.length > 0 && (
-        <section className="rounded-xl border border-danger/35 bg-dash-card p-4">
-          <p className="mb-2 text-[11px] font-bold uppercase text-text-muted">
-            Red Flags
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {flags.map((flag) => (
-              <span
-                key={flag}
-                className="rounded-full border border-danger/40 bg-danger/15 px-2.5 py-[3px] text-xs text-danger brightness-150"
-              >
-                {flag}
-              </span>
-            ))}
-          </div>
-        </section>
-      )}
+    <div className="flex flex-wrap items-center gap-2.5 rounded-[10px] border border-danger/40 bg-danger/10 px-5 py-3.5">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+        <path d="M12 9v4" /><path d="M12 17h.01" />
+      </svg>
+      <span className="text-[14px] font-semibold text-red-300">
+        {primary}
+      </span>
+      {rest.map((flag) => (
+        <span
+          key={flag}
+          className="rounded-full border border-danger/40 bg-danger/15 px-2.5 py-0.5 text-[11px] font-medium text-red-300"
+        >
+          {flag}
+        </span>
+      ))}
     </div>
   );
 }

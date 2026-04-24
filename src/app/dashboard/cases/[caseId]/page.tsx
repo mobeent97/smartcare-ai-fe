@@ -541,11 +541,6 @@ export default function CaseDetailPage() {
                 >
                   Mark Seen
                 </button>
-
-                {/* Divider */}
-                <div className="border-t border-dash-border my-1" />
-
-                {/* Delete case */}
                 <button
                   onClick={() => setDeleteConfirmOpen(true)}
                   className="flex w-full items-center justify-center gap-2 rounded-lg border border-danger/40 bg-danger/5 px-4 py-2.5 text-xs font-semibold text-danger transition-colors hover:border-danger hover:bg-danger/10"
