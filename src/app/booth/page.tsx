@@ -227,7 +227,7 @@ export default function BoothWelcomePage() {
         manager.initialize().catch(() => {});
       }
 
-      router.push(`/booth/${sid}/check`);
+      router.push(`/booth/${sid}/avatar`);
     } catch {
       setAvatarState('error');
     }

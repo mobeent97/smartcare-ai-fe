@@ -52,14 +52,31 @@ const STEPS: StepConfig[] = [
 
 // ─── Speech Recognition helper ────────────────────────────────────────────────
 
-function createRecognition() {
+interface ISpeechRecognition {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+  onresult: ((e: ISpeechRecognitionEvent) => void) | null;
+  onend: (() => void) | null;
+  onerror: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
+interface ISpeechRecognitionEvent {
+  resultIndex: number;
+  results: { isFinal: boolean; [index: number]: { transcript: string } }[];
+}
+
+function createRecognition(): ISpeechRecognition | null {
   const SR =
     typeof window !== 'undefined'
       ? (window as unknown as { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown }).SpeechRecognition ??
         (window as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition
       : null;
   if (!SR) return null;
-  const r = new (SR as new () => SpeechRecognition)();
+  const r = new (SR as new () => ISpeechRecognition)();
   r.continuous = false;
   r.interimResults = true;
   r.lang = 'en-US';
@@ -223,6 +240,7 @@ export default function AvatarConversationPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const router = useRouter();
 
+  const { akoolSessionId } = useBoothStore();
   const [stepIndex, setStepIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>('avatar_speaking');
   const [transcript, setTranscript] = useState('');
@@ -233,7 +251,7 @@ export default function AvatarConversationPage() {
   const [fallbackText, setFallbackText] = useState('');
   const [showFallback, setShowFallback] = useState(false);
 
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recognitionRef = useRef<ISpeechRecognition | null>(null);
   const speakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const step = STEPS[stepIndex];
@@ -242,7 +260,7 @@ export default function AvatarConversationPage() {
   const speakQuestion = useCallback(async (text: string) => {
     setPhase('avatar_speaking');
     try {
-      await api.sendAvatarMessage(sessionId, text);
+      if (akoolSessionId) await api.sendAvatarMessage(akoolSessionId, text, sessionId);
     } catch { /* non-blocking — avatar speaks if connected */ }
     // After estimated speech duration, move to listening
     const estimatedMs = Math.max(3000, text.length * 55);
@@ -276,7 +294,7 @@ export default function AvatarConversationPage() {
     setInterimTranscript('');
     setPhase('listening');
 
-    r.onresult = (e: SpeechRecognitionEvent) => {
+    r.onresult = (e: ISpeechRecognitionEvent) => {
       let interim = '';
       let final = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
@@ -319,7 +337,7 @@ export default function AvatarConversationPage() {
         return;
       }
       if (next_step === 'results' || stepIndex >= STEPS.length - 1) {
-        if (avatar_speech_text) await api.sendAvatarMessage(sessionId, avatar_speech_text);
+        if (avatar_speech_text && akoolSessionId) await api.sendAvatarMessage(akoolSessionId, avatar_speech_text, sessionId);
         router.push(`/booth/${sessionId}/results`);
         return;
       }
@@ -485,7 +503,7 @@ export default function AvatarConversationPage() {
                   <button
                     key={opt.value}
                     onClick={() => submitAnswer(opt.value)}
-                    disabled={phase === 'avatar_speaking' || phase === 'processing'}
+                    disabled={phase !== 'tap_choice'}
                     style={{
                       background: opt.danger ? 'rgba(220,38,38,0.12)' : 'rgba(34,197,94,0.1)',
                       border: `2px solid ${opt.danger ? 'rgba(220,38,38,0.5)' : 'rgba(34,197,94,0.4)'}`,
@@ -520,7 +538,7 @@ export default function AvatarConversationPage() {
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
                     <button
                       onClick={phase === 'listening' ? stopListening : startListening}
-                      disabled={phase === 'avatar_speaking' || phase === 'processing'}
+                      disabled={phase === 'avatar_speaking'}
                       className={phase === 'listening' ? 'mic-active' : ''}
                       style={{
                         width: 96,
