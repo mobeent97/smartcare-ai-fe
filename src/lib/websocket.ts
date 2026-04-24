@@ -2,7 +2,18 @@
 
 import type { TriageSession } from '@/types/api';
 
-const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8000';
+// Auto-upgrade ws:// → wss:// when the page is served over HTTPS.
+// Set NEXT_PUBLIC_WS_URL in your deployment env to point at your backend host.
+function resolveWsBase(): string {
+  const configured = process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:8000';
+  if (typeof window === 'undefined') return configured;
+  if (window.location.protocol === 'https:' && configured.startsWith('ws://')) {
+    return configured.replace('ws://', 'wss://');
+  }
+  return configured;
+}
+
+const WS_BASE = resolveWsBase();
 
 export class DashboardWebSocket {
   private socket: WebSocket | null = null;
