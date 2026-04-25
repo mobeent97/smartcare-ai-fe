@@ -4,9 +4,10 @@ import { classifyBp, classifyTemp, classifyHr, classifySpo2 } from '@/lib/dashbo
 
 interface VitalsPanelProps {
   measurements: DeviceMeasurement[];
+  compact?: boolean;
 }
 
-export function VitalsPanel({ measurements }: VitalsPanelProps) {
+export function VitalsPanel({ measurements, compact = false }: VitalsPanelProps) {
   const bp = measurements.find((m) => m.device_type === 'BLOOD_PRESSURE');
   const temp = measurements.find((m) => m.device_type === 'TEMPERATURE');
   const oximeter = measurements.find((m) => m.device_type === 'OXIMETER');
@@ -64,7 +65,7 @@ export function VitalsPanel({ measurements }: VitalsPanelProps) {
   );
 
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
       <VitalCard
         label="Blood Pressure"
         icon={BPIcon}
@@ -83,24 +84,28 @@ export function VitalsPanel({ measurements }: VitalsPanelProps) {
         tone={tempCls.tone}
         fillPct={tempC != null ? ((tempC - 35) / (41 - 35)) * 100 : null}
       />
-      <VitalCard
-        label="Heart Rate"
-        icon={HRIcon}
-        value={hr != null ? `${hr}` : '—'}
-        unit="bpm"
-        classification={hrCls.label}
-        tone={hrCls.tone}
-        fillPct={hr != null ? ((hr - 40) / (200 - 40)) * 100 : null}
-      />
-      <VitalCard
-        label="SPO₂"
-        icon={SPO2Icon}
-        value={spo2 != null ? `${spo2}` : '—'}
-        unit="%"
-        classification={spo2Cls.label}
-        tone={spo2Cls.tone}
-        fillPct={spo2 != null ? ((spo2 - 80) / (100 - 80)) * 100 : null}
-      />
+      {!compact && (
+        <>
+          <VitalCard
+            label="Heart Rate"
+            icon={HRIcon}
+            value={hr != null ? `${hr}` : '—'}
+            unit="bpm"
+            classification={hrCls.label}
+            tone={hrCls.tone}
+            fillPct={hr != null ? ((hr - 40) / (200 - 40)) * 100 : null}
+          />
+          <VitalCard
+            label="SPO₂"
+            icon={SPO2Icon}
+            value={spo2 != null ? `${spo2}` : '—'}
+            unit="%"
+            classification={spo2Cls.label}
+            tone={spo2Cls.tone}
+            fillPct={spo2 != null ? ((spo2 - 80) / (100 - 80)) * 100 : null}
+          />
+        </>
+      )}
     </div>
   );
 }

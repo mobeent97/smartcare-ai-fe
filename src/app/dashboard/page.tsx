@@ -46,7 +46,7 @@ function DashboardInner() {
   const searchParams = useSearchParams();
   const caseParam = searchParams.get('case');
   const { accessToken, _hasHydrated } = useAuthStore();
-  const { queue, setQueue, updateQueueItem, emergencyAlert, setEmergencyAlert, clearEmergencyAlert } =
+  const { queue, setQueue, updateQueueItem, addOrUpdateQueueItem, removeFromQueue, emergencyAlert, setEmergencyAlert, clearEmergencyAlert } =
     useDashboardStore();
 
   const [tab, setTab] = useState<Tab>('summary');
@@ -55,6 +55,7 @@ function DashboardInner() {
   const [overrideLevel, setOverrideLevel] = useState('');
   const [overrideReason, setOverrideReason] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   useEffect(() => {
     if (!_hasHydrated) return; // wait for localStorage to be read
@@ -74,11 +75,19 @@ function DashboardInner() {
     const ws = new DashboardWebSocket(
       accessToken,
       (sessionId, data) => updateQueueItem(sessionId, data),
-      (alert) => setEmergencyAlert(alert)
+      async (alert) => {
+        // Fetch the emergency session and inject into queue before showing modal.
+        // This ensures "View Patient" has a case to display even for brand-new sessions.
+        try {
+          const res = await api.getCaseDetail(alert.sessionId);
+          if (res.data) addOrUpdateQueueItem(res.data);
+        } catch { /* show alert anyway */ }
+        setEmergencyAlert(alert);
+      }
     );
     ws.connect();
     return () => ws.disconnect();
-  }, [_hasHydrated, accessToken, router, setQueue, updateQueueItem, setEmergencyAlert]);
+  }, [_hasHydrated, accessToken, router, setQueue, updateQueueItem, addOrUpdateQueueItem, setEmergencyAlert]);
 
   useEffect(() => {
     if (!caseParam || !accessToken) {
@@ -132,6 +141,24 @@ function DashboardInner() {
     }
   }
 
+  async function handleDeleteCase() {
+    if (!caseParam) return;
+    setDeleteLoading(true);
+    try {
+      await api.deleteCase(caseParam);
+      removeFromQueue(caseParam);
+      setCaseDetail(null);
+      // Navigate to next case in queue, or clear selection
+      const remaining = queue.filter((s) => s.id !== caseParam);
+      if (remaining.length > 0) {
+        router.replace(`/dashboard?case=${remaining[0].id}`);
+      } else {
+        router.replace('/dashboard');
+      }
+    } catch { /* silent */ }
+    setDeleteLoading(false);
+  }
+
   if (!_hasHydrated) return null; // silent blank until store is ready
   if (!accessToken) return null;
 
@@ -170,6 +197,8 @@ function DashboardInner() {
               actionLoading={actionLoading}
               onOverride={handleOverride}
               onMarkSeen={handleMarkSeen}
+              onRemove={handleDeleteCase}
+              removeLoading={deleteLoading}
             />
           ) : (
             <div className="flex h-full items-center justify-center text-sm text-text-dim">
@@ -208,6 +237,8 @@ interface CasePanelProps {
   actionLoading: boolean;
   onOverride: () => void;
   onMarkSeen: () => void;
+  onRemove: () => void;
+  removeLoading: boolean;
 }
 
 function CasePanel({
@@ -221,6 +252,8 @@ function CasePanel({
   actionLoading,
   onOverride,
   onMarkSeen,
+  onRemove,
+  removeLoading,
 }: CasePanelProps) {
   const answers = session.answers ?? [];
   const complaint = answers.find((a) => a.step_name === 'complaint')?.raw_input;
@@ -232,24 +265,28 @@ function CasePanel({
       <CaseHeader session={session} complaint={complaint} />
       <CaseDetailTabs activeTab={tab} onTabChange={setTab} />
 
-      <div className="p-6">
-        {tab === 'summary' && (
-          <SummaryView
-            session={session}
-            measurements={measurements}
-            auditEvents={auditEvents}
-            overrideLevel={overrideLevel}
-            setOverrideLevel={setOverrideLevel}
-            overrideReason={overrideReason}
-            setOverrideReason={setOverrideReason}
-            actionLoading={actionLoading}
-            onOverride={onOverride}
-            onMarkSeen={onMarkSeen}
-          />
-        )}
-        {tab === 'vitals' && <VitalsPanel measurements={measurements} />}
-        {tab === 'answers' && <AnswerList answers={answers} />}
-        {tab === 'audit' && <AuditTimeline events={auditEvents} />}
+      <div className="p-7">
+        <div>
+          {tab === 'summary' && (
+            <SummaryView
+              session={session}
+              measurements={measurements}
+              auditEvents={auditEvents}
+              overrideLevel={overrideLevel}
+              setOverrideLevel={setOverrideLevel}
+              overrideReason={overrideReason}
+              setOverrideReason={setOverrideReason}
+              actionLoading={actionLoading}
+              onOverride={onOverride}
+              onMarkSeen={onMarkSeen}
+              onRemove={onRemove}
+              removeLoading={removeLoading}
+            />
+          )}
+          {tab === 'vitals' && <VitalsPanel measurements={measurements} />}
+          {tab === 'answers' && <AnswerList answers={answers} />}
+          {tab === 'audit' && <AuditTimeline events={auditEvents} />}
+        </div>
       </div>
     </div>
   );
@@ -270,6 +307,8 @@ function SummaryView({
   actionLoading,
   onOverride,
   onMarkSeen,
+  onRemove,
+  removeLoading,
 }: {
   session: TriageSession;
   measurements: DeviceMeasurement[];
@@ -281,11 +320,13 @@ function SummaryView({
   actionLoading: boolean;
   onOverride: () => void;
   onMarkSeen: () => void;
+  onRemove: () => void;
+  removeLoading: boolean;
 }) {
   const lowConfidence = !session.ctas_level || (session.answers ?? []).length < 3;
 
   return (
-    <div className="grid grid-cols-1 gap-5">
+    <div className="grid grid-cols-1 gap-4">
       <TriageReasoning summary={session.reasoning_summary} />
       <RedFlagAlert flags={session.red_flags ?? []} />
       {lowConfidence && (
@@ -301,10 +342,15 @@ function SummaryView({
         actionLoading={actionLoading}
         onOverride={onOverride}
         onMarkSeen={onMarkSeen}
+        onRemove={onRemove}
+        removeLoading={removeLoading}
       />
 
-      {/* Inline Vitals */}
-      <VitalsPanel measurements={measurements} />
+      {/* Inline Vitals (compact: BP + Temp only) */}
+      <div>
+        <p className="mb-3 text-[11px] uppercase tracking-[0.08em] text-text-dim">Vitals</p>
+        <VitalsPanel measurements={measurements} compact />
+      </div>
 
       {/* Session Timeline */}
       <SessionTimeline events={auditEvents} />

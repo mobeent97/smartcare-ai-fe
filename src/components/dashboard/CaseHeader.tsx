@@ -18,7 +18,7 @@ export function CaseHeader({ session, complaint }: CaseHeaderProps) {
     : 'Clinical Review';
 
   return (
-    <div className="flex flex-wrap items-center gap-3 border-b border-dash-border bg-dash-surface px-6 py-3.5">
+    <div className="flex flex-wrap items-center gap-3 border-b border-dash-border bg-dash-surface px-6 py-4">
       {/* Patient ID */}
       <span className="font-mono text-[13px] font-medium text-text-muted">
         {patientDisplayId(session)}
@@ -31,7 +31,7 @@ export function CaseHeader({ session, complaint }: CaseHeaderProps) {
 
       {/* Chief complaint */}
       {complaint && (
-        <span className="text-base font-bold text-text-primary">
+        <span className="text-[16px] font-semibold text-text-primary">
           {complaint}
         </span>
       )}

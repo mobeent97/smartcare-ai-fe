@@ -31,23 +31,23 @@ export function VitalCard({ label, icon, value, unit, classification, tone, fill
   );
 
   return (
-    <div className={`flex flex-col justify-between overflow-hidden rounded-xl border border-dash-border border-l-[4px] bg-dash-card p-5 lg:px-6 ${t.border}`}>
+    <div className={`flex flex-col justify-between overflow-hidden rounded-xl border border-dash-border border-l-[4px] bg-dash-card px-6 py-5 ${t.border}`}>
       <div>
         {/* Header: icon + label */}
-        <div className="mb-4 flex items-center gap-2">
+        <div className="mb-2 flex items-center gap-2">
           <span className="flex items-center justify-center h-5 w-5">{icon}</span>
-          <span className="text-[13px] uppercase tracking-[0.08em] text-sc-500">
+          <span className="text-[14px] uppercase tracking-[0.05em] text-sc-500">
             {label}
           </span>
         </div>
 
         {/* Value + unit */}
-        <div className="mb-6 flex items-baseline gap-2 min-h-[36px]">
+        <div className="mb-2 flex items-baseline gap-1.5 min-h-[36px]">
           <span className="font-mono text-[36px] font-bold leading-none text-text-primary">
             {displayValue}
           </span>
           {unit && (
-            <span className="text-sm font-medium text-text-muted">
+            <span className="text-sm font-medium text-sc-500">
               {unit}
             </span>
           )}
@@ -72,7 +72,7 @@ export function VitalCard({ label, icon, value, unit, classification, tone, fill
 
         {/* Progress bar */}
         {fillPct !== null && (
-          <div className="h-[3px] w-full overflow-hidden rounded-full bg-dash-bg">
+          <div className="h-[4px] w-full overflow-hidden rounded-full bg-dash-bg">
             <div
               className={`h-full rounded-full transition-all duration-500 ${t.bar}`}
               style={{ width: `${Math.max(2, Math.min(100, fillPct))}%` }}

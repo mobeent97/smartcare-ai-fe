@@ -13,6 +13,7 @@ interface DashboardState {
   emergencyAlert: EmergencyAlert | null;
   setQueue: (queue: TriageSession[]) => void;
   updateQueueItem: (sessionId: string, data: Partial<TriageSession>) => void;
+  addOrUpdateQueueItem: (session: TriageSession) => void;
   removeFromQueue: (sessionId: string) => void;
   setSelectedCase: (session: TriageSession | null) => void;
   setEmergencyAlert: (alert: EmergencyAlert) => void;
@@ -28,6 +29,16 @@ export const useDashboardStore = create<DashboardState>((set) => ({
     set((state) => ({
       queue: state.queue.map((s) => (s.id === sessionId ? { ...s, ...data } : s)),
     })),
+  // Adds session if not in queue, updates it if already present
+  addOrUpdateQueueItem: (session) =>
+    set((state) => {
+      const exists = state.queue.some((s) => s.id === session.id);
+      return {
+        queue: exists
+          ? state.queue.map((s) => (s.id === session.id ? { ...s, ...session } : s))
+          : [session, ...state.queue],
+      };
+    }),
   removeFromQueue: (sessionId) =>
     set((state) => ({
       queue: state.queue.filter((s) => s.id !== sessionId),

@@ -200,16 +200,19 @@ export default function ManualTriagePage() {
   }
 
   async function handleEmergency(answer: 'yes' | 'no') {
-    if (answer === 'yes') {
-      router.push(`/booth/${sessionId}/emergency`);
-      return;
-    }
     setLoading(true);
     try {
-      await api.submitAnswer(sessionId, 'first_look', 'no');
-    } catch { /* non-blocking */ }
+      // Always notify backend first so the dashboard receives the WebSocket alert.
+      // For 'yes' this triggers CTAS-1 escalation; for 'no' it clears the first-look step.
+      await api.submitAnswer(sessionId, 'first_look', answer);
+    } catch { /* navigate regardless — patient safety over API errors */ }
     setLoading(false);
-    setStep('complaint');
+
+    if (answer === 'yes') {
+      router.push(`/booth/${sessionId}/emergency`);
+    } else {
+      setStep('complaint');
+    }
   }
 
   async function handleComplaint() {
