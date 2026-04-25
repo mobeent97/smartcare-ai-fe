@@ -9,7 +9,6 @@ interface AvatarManagerOptions {
   onError?: (error: Error) => void;
 }
 
-// Module-level singleton — persists across page navigations
 let _instance: AKOOLAvatarManager | null = null;
 
 export function getAvatarManager(): AKOOLAvatarManager | null {
@@ -24,10 +23,10 @@ export class AKOOLAvatarManager {
   private isMockMode = false;
   private options: AvatarManagerOptions;
   private _statusPoller: ReturnType<typeof setInterval> | null = null;
+  private _destroyed = false;
 
   constructor(options: AvatarManagerOptions) {
     this.options = options;
-    // Tear down any previous session before claiming the singleton slot
     if (_instance && _instance !== this) {
       _instance.destroy().catch(() => {});
     }
@@ -41,6 +40,14 @@ export class AKOOLAvatarManager {
         this.options.sessionId,
         this.options.avatarType ?? 'nurse'
       );
+
+      // Abort silently if StrictMode cleanup destroyed us during the HTTP request
+      if (this._destroyed) {
+        const err = new Error('AKOOLAvatarManager destroyed during init');
+        (err as Error & { _cancelled?: boolean })._cancelled = true;
+        throw err;
+      }
+
       const data = response.data;
       console.log('[AKOOL] Avatar session created:', JSON.stringify(data));
       this.akoolSessionId = data.session_id;
@@ -57,22 +64,23 @@ export class AKOOLAvatarManager {
           data.agora_token ?? '',
           data.agora_uid ?? 12345
         );
-        // 'connected' fires from user-published when AKOOL starts streaming (10–30s)
       }
       return { akoolSessionId: this.akoolSessionId!, mode: data.mode };
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
-      console.error('[AKOOL] initialize error:', err);
-      this.options.onError?.(err);
+      if (!this._destroyed) {
+        console.error('[AKOOL] initialize error:', err);
+        this.options.onError?.(err);
+      }
       throw err;
     }
   }
 
-  /** Poll AKOOL session status every 5s so we can see when it reaches status 3 (streaming). */
   private _startStatusPoller(): void {
     if (!this.akoolSessionId) return;
     let attempts = 0;
     this._statusPoller = setInterval(async () => {
+      if (this._destroyed) { clearInterval(this._statusPoller!); return; }
       attempts++;
       try {
         const json = await api.getAvatarSessionStatus(this.akoolSessionId!);
@@ -85,7 +93,7 @@ export class AKOOLAvatarManager {
           this._statusPoller = null;
         }
         if (attempts >= 24) {
-          console.warn('[AKOOL] Status poll timeout — session never reached status 3 after 2 min');
+          console.warn('[AKOOL] Status poll timeout after 2 min');
           clearInterval(this._statusPoller!);
           this._statusPoller = null;
         }
@@ -101,12 +109,14 @@ export class AKOOLAvatarManager {
     token: string,
     uid: number
   ): Promise<void> {
+    if (this._destroyed) return;
     console.log(`[AKOOL] Connecting Agora — appId=${appId.slice(0,8)}… channel=${channel} uid=${uid} token=${token ? 'present' : 'EMPTY'}`);
 
     const AgoraRTC = (await import('agora-rtc-sdk-ng')).default;
-    AgoraRTC.setLogLevel(0); // verbose Agora SDK logs
+    AgoraRTC.setLogLevel(2); // warnings only — suppress verbose Agora noise
 
-    // Try h264 first — AKOOL's streaming engine typically publishes H264
+    if (this._destroyed) return;
+
     this.client = AgoraRTC.createClient({ mode: 'rtc', codec: 'h264' });
 
     this.client.on('connection-state-change', (cur, prev) => {
@@ -125,16 +135,9 @@ export class AKOOLAvatarManager {
       console.error('[AKOOL] Agora exception:', evt);
     });
 
-    // Register BEFORE join so we never miss an early publish event
     this.client.on('user-published', async (user, mediaType) => {
+      if (this._destroyed) return;
       console.log(`[AKOOL] user-published uid=${user.uid} mediaType=${mediaType}`);
-      console.log('[AKOOL] user-published full user object:', JSON.stringify({
-        uid: user.uid,
-        hasAudio: user.hasAudio,
-        hasVideo: user.hasVideo,
-        audioTrack: !!user.audioTrack,
-        videoTrack: !!user.videoTrack,
-      }));
 
       try {
         await this.client!.subscribe(user, mediaType);
@@ -144,22 +147,14 @@ export class AKOOLAvatarManager {
         return;
       }
 
+      if (this._destroyed) return;
+
       if (mediaType === 'video') {
         this.remoteVideoTrack = user.videoTrack ?? null;
-        console.log('[AKOOL] Video track after subscribe:', this.remoteVideoTrack);
-        console.log('[AKOOL] Target video element:', this.options.videoElement);
-        console.log('[AKOOL] Video element in DOM:', document.body.contains(this.options.videoElement));
-
         if (this.remoteVideoTrack) {
-          try {
-            this.remoteVideoTrack.play(this.options.videoElement);
-            console.log('[AKOOL] Video track.play() called successfully');
-          } catch (e) {
-            console.error('[AKOOL] Video track.play() error:', e);
-          }
+          console.log('[AKOOL] Playing video on element:', this.options.videoElement.tagName, 'muted:', this.options.videoElement.muted);
+          this.remoteVideoTrack.play(this.options.videoElement);
           this.options.onConnectionChange?.('connected');
-        } else {
-          console.error('[AKOOL] user.videoTrack is null after subscribe — cannot play video');
         }
       }
 
@@ -176,52 +171,91 @@ export class AKOOLAvatarManager {
       console.log('[AKOOL] user-unpublished:', user.uid, mediaType);
     });
 
-    // uid=null → Agora auto-assigns a random UID, avoids UID_CONFLICT on hot-reload
+    if (this._destroyed) return;
     await this.client.join(appId, channel, token || null, null);
-    console.log('[AKOOL] Joined Agora channel. Remote users already in channel:', this.client.remoteUsers.map(u => u.uid));
-    // createDataStream does not exist in Agora Web SDK v4.x — speak() uses AKOOL REST API instead
+    console.log('[AKOOL] Joined Agora channel. Remote users:', this.client.remoteUsers.map(u => u.uid));
   }
 
-  /** Re-attach the live video track to a new DOM element (called on each page mount). */
   attachVideo(el: HTMLVideoElement): void {
     this.options.videoElement = el;
     if (this.remoteVideoTrack) {
-      console.log('[AKOOL] Re-attaching video track to new element');
       this.remoteVideoTrack.stop();
       this.remoteVideoTrack.play(el);
     }
   }
 
-  async speak(text: string, sessionId?: string): Promise<void> {
-    if (this.isMockMode || !this.akoolSessionId) return;
-    // AKOOL text-to-speech via REST API (Agora data streams removed in SDK v4.x)
+  /**
+   * Send TTS text to AKOOL via Agora data stream.
+   * Agora 1KB message limit → chunk text at 800 chars.
+   * sendStreamMessage is not in public types but exists in the SDK.
+   */
+  async speak(text: string): Promise<void> {
+    if (this.isMockMode || !this.client || this._destroyed) return;
+
+    const CHUNK_SIZE = 800;
+    const chunks: string[] = [];
+    for (let i = 0; i < text.length; i += CHUNK_SIZE) {
+      chunks.push(text.slice(i, i + CHUNK_SIZE));
+    }
+
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const msg = {
+        v: 2,
+        type: 'chat',
+        mid: `msg-${Date.now()}-${idx}`,
+        idx,
+        fin: idx === chunks.length - 1,
+        pld: { text: chunks[idx] },
+      };
+      try {
+        await (this.client as any).sendStreamMessage(JSON.stringify(msg), false);
+        console.log(`[AKOOL] TTS chunk ${idx + 1}/${chunks.length} sent:`, chunks[idx].slice(0, 40));
+      } catch (e) {
+        console.warn('[AKOOL] sendStreamMessage failed:', e);
+      }
+    }
+  }
+
+  async interrupt(): Promise<void> {
+    if (!this.client || this._destroyed) return;
+    const msg = { v: 2, type: 'command', mid: `msg-${Date.now()}`, pld: { cmd: 'interrupt' } };
     try {
-      await api.sendAvatarMessage(this.akoolSessionId, text, sessionId ?? '');
+      await (this.client as any).sendStreamMessage(JSON.stringify(msg), false);
     } catch (e) {
-      console.warn('[AKOOL] speak() REST call failed:', e);
+      console.warn('[AKOOL] interrupt failed:', e);
     }
   }
 
   async destroy(): Promise<void> {
+    if (this._destroyed) return;
+    this._destroyed = true;
+
     if (this._statusPoller) {
       clearInterval(this._statusPoller);
       this._statusPoller = null;
     }
+
+    if (!this.isMockMode && this.akoolSessionId) {
+      try {
+        await api.closeAvatarSession(this.akoolSessionId, this.options.sessionId);
+      } catch { /* best-effort */ }
+    }
+
     this.remoteVideoTrack?.stop();
     this.remoteAudioTrack?.stop();
+
     if (!this.isMockMode && this.client) {
-      await this.client.leave();
+      try { await this.client.leave(); } catch { /* best-effort */ }
     }
+
     this.options.onConnectionChange?.('disconnected');
     this.akoolSessionId = null;
-    _instance = null;
+
+    // Only release the singleton slot if we still own it
+    if (_instance === this) _instance = null;
   }
 
   get isLive(): boolean {
-    return !this.isMockMode && this.akoolSessionId !== null;
-  }
-
-  get sessionId_akool(): string | null {
-    return this.akoolSessionId;
+    return !this.isMockMode && !this._destroyed && this.akoolSessionId !== null;
   }
 }

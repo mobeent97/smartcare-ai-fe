@@ -58,6 +58,14 @@ class ApiClient {
     return res.data;
   }
 
+  async closeAvatarSession(akoolSessionId: string, sessionId: string) {
+    const res = await this.client.post('/triage/avatar/session/close/', {
+      akool_session_id: akoolSessionId,
+      session_id: sessionId,
+    });
+    return res.data;
+  }
+
   async getAvatarSessionStatus(akoolSessionId: string) {
     const res = await this.client.get<ApiResponse<unknown>>('/triage/avatar/session/status/', {
       params: { akool_session_id: akoolSessionId },

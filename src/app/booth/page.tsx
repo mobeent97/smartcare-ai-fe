@@ -3,7 +3,6 @@
 import { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { AKOOLAvatarManager } from '@/lib/akool';
 import { useBoothStore } from '@/store/booth';
 
 /* ─── SVG Icons ─────────────────────────────────────────────── */
@@ -195,8 +194,7 @@ function ModeCard({ illustration, title, subtitle, features, accentColor, button
 /* ─── Main Page ──────────────────────────────────────────────── */
 export default function BoothWelcomePage() {
   const router = useRouter();
-  const { setSessionId, setAvatarStatus } = useBoothStore();
-  const hiddenVideoRef = useRef<HTMLVideoElement | null>(null);
+  const { setSessionId } = useBoothStore();
 
   const [avatarState, setAvatarState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [manualState, setManualState] = useState<'idle' | 'loading' | 'error'>('idle');
@@ -208,24 +206,6 @@ export default function BoothWelcomePage() {
       const res = await api.createTriageSession();
       const sid = res.data.id;
       setSessionId(sid);
-
-      // Initialize AKOOL avatar with hidden video element so it starts
-      // connecting in the background. AvatarPanel.attachVideo() re-attaches
-      // to the real visible element when the next page mounts.
-      if (hiddenVideoRef.current) {
-        setAvatarStatus('connecting');
-        const manager = new AKOOLAvatarManager({
-          sessionId: sid,
-          avatarType: 'nurse',
-          videoElement: hiddenVideoRef.current,
-          onConnectionChange: (state) =>
-            setAvatarStatus(
-              state === 'connected' ? 'live' : state === 'connecting' ? 'connecting' : 'idle'
-            ),
-          onError: () => setAvatarStatus('idle'),
-        });
-        manager.initialize().catch(() => {});
-      }
 
       router.push(`/booth/${sid}/avatar`);
     } catch {
@@ -276,16 +256,7 @@ export default function BoothWelcomePage() {
         .mode-card-wrap { transition: transform 0.2s ease; }
       `}</style>
 
-      {/* Hidden video for AKOOL background initialization */}
-      <video
-        ref={hiddenVideoRef}
-        autoPlay
-        playsInline
-        muted
-        style={{ position: 'fixed', width: 0, height: 0, opacity: 0, pointerEvents: 'none', top: 0, left: 0 }}
-      />
-
-      <div
+<div
         className="min-h-screen flex flex-col relative overflow-hidden"
         style={{ background: 'var(--color-dash-bg)' }}
       >
