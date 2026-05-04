@@ -53,6 +53,11 @@ class ApiClient {
     return res.data;
   }
 
+  async ttsSpeak(text: string): Promise<Blob> {
+    const res = await this.client.post('/triage/avatar/speak/', { text }, { responseType: 'blob' });
+    return res.data as Blob;
+  }
+
   async sendAvatarMessage(akoolSessionId: string, text: string, sessionId: string) {
     const res = await this.client.post('/triage/avatar/speak/', { akool_session_id: akoolSessionId, text, session_id: sessionId });
     return res.data;
