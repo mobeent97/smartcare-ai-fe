@@ -199,6 +199,7 @@ export default function BoothWelcomePage() {
   const [avatarState, setAvatarState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [manualState, setManualState] = useState<'idle' | 'loading' | 'error'>('idle');
 
+
   async function handleAvatarMode() {
     if (avatarState === 'loading') return;
     setAvatarState('loading');
@@ -207,7 +208,7 @@ export default function BoothWelcomePage() {
       const sid = res.data.id;
       setSessionId(sid);
 
-      router.push(`/booth/${sid}/avatar`);
+      router.push(`/booth/${sid}/consent`);
     } catch {
       setAvatarState('error');
     }

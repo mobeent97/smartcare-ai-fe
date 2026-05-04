@@ -1,10 +1,9 @@
 'use client';
 
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { useBoothStore } from '@/store/booth';
-import { AKOOLAvatarManager, getAvatarManager } from '@/lib/akool';
+import { VideoAvatarManager, getAvatarManager, type VideoState } from '@/lib/video-avatar';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +48,13 @@ const STEPS: StepConfig[] = [
     inputType: 'voice',
   },
 ];
+
+const INTRO_SCRIPT =
+  "Hello! I'm Nurse AI, your virtual triage assistant at SmartCare. " +
+  "I'm here to ask you a few quick questions about how you're feeling today, " +
+  "so we can make sure you get the right care as quickly as possible. " +
+  "Please speak your answers clearly, and take your time — there's no rush. " +
+  "Let's get started.";
 
 // ─── Speech Recognition ────────────────────────────────────────────────────────
 
@@ -140,101 +146,66 @@ export default function AvatarConversationPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const router = useRouter();
 
-  const { akoolSessionId, setAkoolSessionId, setAvatarStatus, avatarStatus } = useBoothStore();
   const [stepIndex, setStepIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>('avatar_speaking');
+  const [videoState, setVideoState] = useState<VideoState>('idle');
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
-  const [history, setHistory] = useState<{ q: string; a: string }[]>([]);
   const [error, setError] = useState('');
   const [sttSupported, setSttSupported] = useState(true);
   const [fallbackText, setFallbackText] = useState('');
   const [showFallback, setShowFallback] = useState(false);
 
-  const mainVideoRef = useRef<HTMLVideoElement | null>(null);
   const recognitionRef = useRef<ISpeechRecognition | null>(null);
-  const speakTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const sentForStepRef = useRef(-1);
-  const introSentRef = useRef(false);   // prevent intro double-send and gate step speech
 
   const step = STEPS[stepIndex];
-  const isLive = avatarStatus === 'live';
-  const isConnecting = avatarStatus === 'connecting';
+  const isSpeaking = phase === 'avatar_speaking';
 
-  const INTRO_SCRIPT =
-    "Hello! I'm Nurse AI, your virtual triage assistant at SmartCare. " +
-    "I'm here to ask you a few quick questions about how you're feeling today, " +
-    "so we can make sure you get the right care as quickly as possible. " +
-    "Please speak your answers clearly, and take your time — there's no rush. " +
-    "Let's get started.";
-
-  // ── When avatar goes live: play intro → then first step question ──
+  // ── Init manager + intro on mount ──
   useEffect(() => {
-    if (avatarStatus !== 'live' || introSentRef.current) return;
-    introSentRef.current = true;
+    if (!sessionId) return;
+    let cancelled = false;
 
-    getAvatarManager()?.speak(INTRO_SCRIPT).catch(() => {});
-
-    // After intro finishes, speak step 0 question
-    const timer = setTimeout(() => {
-      sentForStepRef.current = 0;
-      const text = STEPS[0]?.question;
-      if (text) getAvatarManager()?.speak(text).catch(() => {});
-    }, INTRO_SCRIPT.length * 52 + 1500);
-
-    return () => clearTimeout(timer);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [avatarStatus]);
-
-  // ── On step change: speak question via stream ──
-  useEffect(() => {
-    if (stepIndex === 0) return; // step 0 handled by intro flow above
-    if (!introSentRef.current) return;
-    const text = STEPS[stepIndex]?.question;
-    if (text) getAvatarManager()?.speak(text).catch(() => {});
-  }, [stepIndex]);
-
-  // ── Init AKOOL on mount with real video element ──
-  useEffect(() => {
-    if (!sessionId || !mainVideoRef.current) return;
-    setAvatarStatus('connecting');
-    const manager = new AKOOLAvatarManager({
-      sessionId,
-      avatarType: 'nurse',
-      videoElement: mainVideoRef.current,
-      onConnectionChange: (state) =>
-        setAvatarStatus(state === 'connected' ? 'live' : state === 'connecting' ? 'connecting' : 'idle'),
-      onError: () => setAvatarStatus('idle'),
+    const mgr = new VideoAvatarManager({
+      onStateChange: (s) => { if (!cancelled) setVideoState(s); },
     });
-    manager.initialize()
-      .then(({ akoolSessionId }) => setAkoolSessionId(akoolSessionId))
-      .catch((err) => {
-        if ((err as Error & { _cancelled?: boolean })?._cancelled) return; // StrictMode cleanup, ignore
-        console.error('[AKOOL] initialize failed:', err);
-      });
-    return () => { manager.destroy().catch(() => {}); };
+
+    (async () => {
+      await mgr.speak(INTRO_SCRIPT);
+      if (cancelled) return;
+      await mgr.speak(STEPS[0].question);
+      if (cancelled) return;
+      setPhase(STEPS[0].inputType === 'tap' ? 'tap_choice' : 'listening');
+    })().catch(() => {});
+
+    return () => { cancelled = true; mgr.destroy(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // ── Step 1+ question ──
+  useEffect(() => {
+    if (stepIndex === 0) return;
+    let cancelled = false;
+    setPhase('avatar_speaking');
+    setTranscript('');
+    setInterimTranscript('');
+    setError('');
+
+    (async () => {
+      const mgr = getAvatarManager();
+      if (!mgr) return;
+      await mgr.speak(STEPS[stepIndex].question);
+      if (cancelled) return;
+      setPhase(STEPS[stepIndex].inputType === 'tap' ? 'tap_choice' : 'listening');
+    })().catch(() => {});
+
+    return () => { cancelled = true; };
+  }, [stepIndex]);
 
   // ── STT support check ──
   useEffect(() => {
     setSttSupported(!!createRecognition());
   }, []);
-
-  // ── On step change: set phase + listening timer (TTS handled separately above) ──
-  useEffect(() => {
-    if (stepIndex >= STEPS.length) return;
-    setTranscript('');
-    setInterimTranscript('');
-    setError('');
-    setPhase('avatar_speaking');
-    const s = STEPS[stepIndex];
-    const estimatedMs = Math.max(3000, s.question.length * 55);
-    speakTimerRef.current = setTimeout(() => {
-      setPhase(s.inputType === 'tap' ? 'tap_choice' : 'listening');
-    }, estimatedMs);
-    return () => { if (speakTimerRef.current) clearTimeout(speakTimerRef.current); };
-  }, [stepIndex]);
 
   // ── Mic ──
   function startListening() {
@@ -243,6 +214,7 @@ export default function AvatarConversationPage() {
     setTranscript('');
     setInterimTranscript('');
     setPhase('listening');
+    getAvatarManager()?.showListening();
     r.onresult = (e: ISpeechRecognitionEvent) => {
       let interim = '';
       let final = '';
@@ -253,8 +225,13 @@ export default function AvatarConversationPage() {
       if (final) setTranscript((prev) => (prev + ' ' + final).trim());
       setInterimTranscript(interim);
     };
-    r.onend = () => { setInterimTranscript(''); setPhase('confirming'); };
+    r.onend = () => {
+      getAvatarManager()?.showIdle();
+      setInterimTranscript('');
+      setPhase('confirming');
+    };
     r.onerror = (e: { error?: string }) => {
+      getAvatarManager()?.showIdle();
       const code = e?.error;
       if (code === 'not-allowed' || code === 'service-not-allowed') {
         setError('Microphone access denied. Please allow microphone permission and try again, or use keyboard input below.');
@@ -268,6 +245,7 @@ export default function AvatarConversationPage() {
 
   function stopListening() {
     recognitionRef.current?.stop();
+    getAvatarManager()?.showIdle();
     setPhase('confirming');
   }
 
@@ -279,7 +257,6 @@ export default function AvatarConversationPage() {
     try {
       const res = await api.submitAnswer(sessionId, step.stepName, answer.trim());
       const { next_step, avatar_speech_text } = res.data;
-      setHistory((h) => [...h, { q: step.question, a: answer.trim() }]);
       if (step.stepName === 'first_look' && answer === 'yes') {
         router.push(`/booth/${sessionId}/emergency`);
         return;
@@ -295,8 +272,6 @@ export default function AvatarConversationPage() {
       setPhase(step.inputType === 'tap' ? 'tap_choice' : 'listening');
     }
   }
-
-  const isSpeaking = phase === 'avatar_speaking';
 
   return (
     <>
@@ -323,9 +298,6 @@ export default function AvatarConversationPage() {
           0%,100% { transform:scale(1); opacity:1; }
           50%      { transform:scale(1.4); opacity:0.6; }
         }
-        @keyframes connect-spin {
-          to { transform:rotate(360deg); }
-        }
         @keyframes video-glow {
           0%,100% { box-shadow: 0 0 30px 6px rgba(9,246,238,0.12), 0 0 60px 12px rgba(9,246,238,0.06); }
           50%      { box-shadow: 0 0 40px 10px rgba(9,246,238,0.22), 0 0 80px 20px rgba(9,246,238,0.1); }
@@ -351,7 +323,6 @@ export default function AvatarConversationPage() {
           top: 0,
           zIndex: 10,
         }}>
-          {/* Logo */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{
               width: 32, height: 32, borderRadius: 8,
@@ -368,10 +339,8 @@ export default function AvatarConversationPage() {
             </span>
           </div>
 
-          {/* Step dots */}
           <StepDots total={STEPS.length} current={stepIndex} />
 
-          {/* Emergency */}
           <button
             onClick={() => router.push(`/booth/${sessionId}/emergency`)}
             style={{
@@ -420,103 +389,59 @@ export default function AvatarConversationPage() {
               minHeight: 260,
               borderRadius: 28,
               overflow: 'hidden',
-              border: `2px solid rgba(9,246,238,${isLive ? '0.35' : '0.12'})`,
+              border: '2px solid rgba(9,246,238,0.35)',
               background: 'var(--color-dash-card)',
               position: 'relative',
-              animation: isLive ? 'video-glow 3s ease-in-out infinite' : 'none',
-              transition: 'border-color 0.5s',
+              animation: 'video-glow 3s ease-in-out infinite',
             }}>
-              {/* Live video */}
+              {/* Idle loop */}
               <video
-                ref={mainVideoRef}
-                autoPlay
-                playsInline
+                src="/avatar/idle.mp4"
+                autoPlay loop muted playsInline
                 style={{
-                  width: '100%', height: '100%',
-                  objectFit: 'cover',
-                  display: isLive ? 'block' : 'none',
+                  width: '100%', height: '100%', objectFit: 'cover',
+                  display: videoState === 'idle' ? 'block' : 'none',
+                }}
+              />
+              {/* Speaking loop */}
+              <video
+                src="/avatar/speaking.mp4"
+                autoPlay loop muted playsInline
+                style={{
+                  width: '100%', height: '100%', objectFit: 'cover',
+                  display: videoState === 'speaking' ? 'block' : 'none',
+                }}
+              />
+              {/* Listening loop */}
+              <video
+                src="/avatar/listening.mp4"
+                autoPlay loop muted playsInline
+                style={{
+                  width: '100%', height: '100%', objectFit: 'cover',
+                  display: videoState === 'listening' ? 'block' : 'none',
                 }}
               />
 
-              {/* Connecting spinner */}
-              {isConnecting && !isLive && (
-                <div style={{
-                  position: 'absolute', inset: 0,
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                  gap: 16, background: 'var(--color-dash-card)',
-                }}>
-                  <div style={{ position: 'relative', width: 64, height: 64 }}>
-                    <div style={{
-                      position: 'absolute', inset: 0, borderRadius: '50%',
-                      border: '2px solid rgba(9,246,238,0.1)',
-                      borderTop: '2px solid #09f6ee',
-                      animation: 'connect-spin 1s linear infinite',
-                    }} />
-                    <div style={{
-                      position: 'absolute', inset: 10, borderRadius: '50%',
-                      border: '1.5px solid rgba(54,201,197,0.15)',
-                      borderBottom: '1.5px solid #36c9c5',
-                      animation: 'connect-spin 1.4s linear infinite reverse',
-                    }} />
-                    <svg style={{ position: 'absolute', inset: 18 }} width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#09f6ee" strokeWidth="1.5" strokeLinecap="round">
-                      <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
-                    </svg>
-                  </div>
-                  <div style={{ textAlign: 'center' }}>
-                    <p style={{ color: '#09f6ee', fontSize: 13, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 4 }}>
-                      Connecting Avatar
-                    </p>
-                    <p style={{ color: 'rgba(9,246,238,0.45)', fontSize: 11 }}>
-                      Nurse AI is warming up…
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Idle placeholder */}
-              {!isLive && !isConnecting && (
-                <div style={{
-                  position: 'absolute', inset: 0,
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                  gap: 14,
-                }}>
-                  <div style={{
-                    width: 72, height: 72, borderRadius: '50%',
-                    background: 'rgba(9,246,238,0.06)',
-                    border: '1.5px solid rgba(9,246,238,0.18)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  }}>
-                    <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#09f6ee" strokeWidth="1.2" opacity="0.6">
-                      <circle cx="12" cy="8" r="4"/>
-                      <path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/>
-                    </svg>
-                  </div>
-                  <p style={{ color: 'rgba(9,246,238,0.4)', fontSize: 12, fontWeight: 600 }}>Nurse AI</p>
-                </div>
-              )}
-
               {/* Live badge */}
-              {isLive && (
-                <div style={{
-                  position: 'absolute', top: 12, right: 12,
-                  display: 'flex', alignItems: 'center', gap: 5,
-                  background: 'rgba(5,20,20,0.75)',
-                  border: '1px solid rgba(9,246,238,0.3)',
-                  borderRadius: 20,
-                  padding: '4px 10px',
-                  backdropFilter: 'blur(8px)',
-                }}>
-                  <span style={{
-                    width: 6, height: 6, borderRadius: '50%',
-                    background: '#09f6ee',
-                    animation: 'status-dot 1.5s ease-in-out infinite',
-                    display: 'block',
-                  }} />
-                  <span style={{ color: '#09f6ee', fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
-                    Live
-                  </span>
-                </div>
-              )}
+              <div style={{
+                position: 'absolute', top: 12, right: 12,
+                display: 'flex', alignItems: 'center', gap: 5,
+                background: 'rgba(5,20,20,0.75)',
+                border: '1px solid rgba(9,246,238,0.3)',
+                borderRadius: 20,
+                padding: '4px 10px',
+                backdropFilter: 'blur(8px)',
+              }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: '#09f6ee',
+                  animation: 'status-dot 1.5s ease-in-out infinite',
+                  display: 'block',
+                }} />
+                <span style={{ color: '#09f6ee', fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                  Live
+                </span>
+              </div>
 
               {/* Gradient overlay bottom */}
               <div style={{
@@ -578,11 +503,6 @@ export default function AvatarConversationPage() {
               }}>
                 Step {stepIndex + 1} of {STEPS.length}
               </span>
-              {history.length > 0 && (
-                <span style={{ color: 'rgba(9,246,238,0.3)', fontSize: 10 }}>
-                  {history.length} answered
-                </span>
-              )}
             </div>
 
             {/* Question bubble */}
@@ -598,7 +518,6 @@ export default function AvatarConversationPage() {
                 overflow: 'hidden',
               }}
             >
-              {/* Subtle left accent */}
               <div style={{
                 position: 'absolute', left: 0, top: 0, bottom: 0, width: 3,
                 background: isSpeaking
@@ -609,12 +528,7 @@ export default function AvatarConversationPage() {
               }} />
               <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, paddingLeft: 8 }}>
                 <span style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }}>🩺</span>
-                <p style={{
-                  color: '#e0fffe',
-                  fontSize: 15,
-                  lineHeight: 1.65,
-                  fontWeight: 500,
-                }}>
+                <p style={{ color: '#e0fffe', fontSize: 15, lineHeight: 1.65, fontWeight: 500 }}>
                   {step?.question}
                 </p>
               </div>
@@ -627,19 +541,15 @@ export default function AvatarConversationPage() {
                   <button
                     key={opt.value}
                     onClick={() => submitAnswer(opt.value)}
-                    disabled={phase !== 'tap_choice'}
                     style={{
-                      background: opt.danger
-                        ? 'rgba(220,38,38,0.08)'
-                        : 'rgba(34,197,94,0.07)',
+                      background: opt.danger ? 'rgba(220,38,38,0.08)' : 'rgba(34,197,94,0.07)',
                       border: `1.5px solid ${opt.danger ? 'rgba(220,38,38,0.4)' : 'rgba(34,197,94,0.35)'}`,
                       borderRadius: 14,
                       padding: '18px 24px',
                       color: opt.danger ? '#fca5a5' : '#86efac',
                       fontSize: 15,
                       fontWeight: 700,
-                      cursor: phase !== 'tap_choice' ? 'not-allowed' : 'pointer',
-                      opacity: phase === 'avatar_speaking' ? 0.45 : 1,
+                      cursor: 'pointer',
                       transition: 'all 0.15s',
                       textAlign: 'center',
                       width: '100%',
@@ -648,11 +558,6 @@ export default function AvatarConversationPage() {
                     {opt.label}
                   </button>
                 ))}
-                {phase === 'avatar_speaking' && (
-                  <p style={{ color: 'rgba(9,246,238,0.4)', fontSize: 11, textAlign: 'center' }}>
-                    Listen to the question first…
-                  </p>
-                )}
               </div>
             )}
 
@@ -660,25 +565,20 @@ export default function AvatarConversationPage() {
             {step?.inputType === 'voice' && (
               <div className="fade-up" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
 
-                {/* Mic button + waveform */}
                 {(phase === 'listening' || phase === 'confirming' || phase === 'avatar_speaking') && (
                   <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
                     <button
                       onClick={phase === 'listening' ? stopListening : startListening}
-                      disabled={phase === 'avatar_speaking'}
                       className={phase === 'listening' ? 'mic-live' : ''}
                       style={{
-                        width: 88,
-                        height: 88,
-                        borderRadius: '50%',
+                        width: 88, height: 88, borderRadius: '50%',
                         border: `2.5px solid ${phase === 'listening' ? '#09f6ee' : 'rgba(9,246,238,0.25)'}`,
                         background: phase === 'listening'
                           ? 'radial-gradient(circle, rgba(9,246,238,0.18) 0%, rgba(54,201,197,0.08) 100%)'
                           : 'rgba(9,246,238,0.04)',
-                        cursor: phase === 'avatar_speaking' ? 'not-allowed' : 'pointer',
+                        cursor: 'pointer',
                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                         transition: 'all 0.2s',
-                        opacity: phase === 'avatar_speaking' ? 0.35 : 1,
                         flexShrink: 0,
                       }}
                     >
@@ -703,16 +603,10 @@ export default function AvatarConversationPage() {
 
                     <p style={{
                       color: phase === 'listening' ? '#09f6ee' : 'rgba(9,246,238,0.45)',
-                      fontSize: 11,
-                      fontWeight: 700,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.1em',
+                      fontSize: 11, fontWeight: 700,
+                      textTransform: 'uppercase', letterSpacing: '0.1em',
                     }}>
-                      {phase === 'listening'
-                        ? 'Listening — tap to stop'
-                        : phase === 'avatar_speaking'
-                          ? 'Please wait…'
-                          : 'Tap to speak'}
+                      {phase === 'listening' ? 'Listening — tap to stop' : 'Tap to speak'}
                     </p>
                   </div>
                 )}
@@ -723,9 +617,7 @@ export default function AvatarConversationPage() {
                     width: '100%',
                     background: 'rgba(9,246,238,0.03)',
                     border: '1px solid rgba(9,246,238,0.12)',
-                    borderRadius: 12,
-                    padding: '12px 16px',
-                    minHeight: 50,
+                    borderRadius: 12, padding: '12px 16px', minHeight: 50,
                   }}>
                     <p style={{ color: '#f0fffe', fontSize: 14, lineHeight: 1.55, fontFamily: 'monospace' }}>
                       {transcript}
@@ -744,14 +636,8 @@ export default function AvatarConversationPage() {
                       style={{
                         flex: 1,
                         background: 'linear-gradient(135deg, #36c9c5, #09f6ee)',
-                        border: 'none',
-                        borderRadius: 12,
-                        padding: '14px 0',
-                        color: '#051414',
-                        fontSize: 14,
-                        fontWeight: 800,
-                        cursor: 'pointer',
-                        letterSpacing: '0.02em',
+                        border: 'none', borderRadius: 12, padding: '14px 0',
+                        color: '#051414', fontSize: 14, fontWeight: 800, cursor: 'pointer',
                       }}
                     >
                       ✓ Confirm
@@ -762,12 +648,8 @@ export default function AvatarConversationPage() {
                         flex: 1,
                         background: 'rgba(9,246,238,0.05)',
                         border: '1px solid rgba(9,246,238,0.18)',
-                        borderRadius: 12,
-                        padding: '14px 0',
-                        color: '#09f6ee',
-                        fontSize: 14,
-                        fontWeight: 600,
-                        cursor: 'pointer',
+                        borderRadius: 12, padding: '14px 0',
+                        color: '#09f6ee', fontSize: 14, fontWeight: 600, cursor: 'pointer',
                       }}
                     >
                       ↺ Re-record
@@ -797,13 +679,9 @@ export default function AvatarConversationPage() {
                         width: '100%',
                         background: 'var(--color-dash-card)',
                         border: '1px solid rgba(9,246,238,0.18)',
-                        borderRadius: 12,
-                        padding: '12px 16px',
-                        color: '#f0fffe',
-                        fontSize: 14,
-                        outline: 'none',
-                        resize: 'none',
-                        fontFamily: 'inherit',
+                        borderRadius: 12, padding: '12px 16px',
+                        color: '#f0fffe', fontSize: 14,
+                        outline: 'none', resize: 'none', fontFamily: 'inherit',
                       }}
                     />
                     <button
@@ -813,12 +691,9 @@ export default function AvatarConversationPage() {
                         background: fallbackText.trim()
                           ? 'linear-gradient(135deg, #36c9c5, #09f6ee)'
                           : 'rgba(9,246,238,0.08)',
-                        border: 'none',
-                        borderRadius: 12,
-                        padding: '13px 0',
+                        border: 'none', borderRadius: 12, padding: '13px 0',
                         color: fallbackText.trim() ? '#051414' : 'rgba(9,246,238,0.3)',
-                        fontSize: 14,
-                        fontWeight: 800,
+                        fontSize: 14, fontWeight: 800,
                         cursor: fallbackText.trim() ? 'pointer' : 'not-allowed',
                       }}
                     >
@@ -847,10 +722,8 @@ export default function AvatarConversationPage() {
               <div style={{
                 background: 'rgba(220,38,38,0.08)',
                 border: '1px solid rgba(220,38,38,0.3)',
-                borderRadius: 10,
-                padding: '10px 14px',
-                color: '#fca5a5',
-                fontSize: 13,
+                borderRadius: 10, padding: '10px 14px',
+                color: '#fca5a5', fontSize: 13,
               }}>
                 {error}
               </div>
@@ -858,7 +731,6 @@ export default function AvatarConversationPage() {
           </div>
         </div>
 
-        {/* ── Bottom safe area ─────────────────────────────────────────────── */}
         <div style={{ height: 12, flexShrink: 0 }} />
       </div>
     </>
