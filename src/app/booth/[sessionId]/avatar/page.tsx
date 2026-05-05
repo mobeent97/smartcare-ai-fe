@@ -19,7 +19,7 @@ type Phase =
 interface StepConfig {
   stepName: string;
   question: string;
-  inputType: 'voice' | 'tap';
+  inputType: 'voice' | 'tap' | 'vitals';
   tapOptions?: { label: string; value: string; danger?: boolean }[];
 }
 
@@ -57,6 +57,11 @@ const STEPS: StepConfig[] = [
     stepName: 'medical_history',
     question: 'Do you have any known medical conditions like diabetes, heart disease, or high blood pressure? Are you on any blood thinners or regular medications?',
     inputType: 'voice',
+  },
+  {
+    stepName: 'vitals',
+    question: 'Excellent! Finally, I\'d like to take a few quick measurements — blood pressure, temperature, and oxygen level. These help me give you the most accurate assessment. Please tap Ready when you\'re comfortable.',
+    inputType: 'vitals',
   },
 ];
 
@@ -171,6 +176,14 @@ export default function AvatarConversationPage() {
 
   const recognitionRef = useRef<ISpeechRecognition | null>(null);
   const waveformRef = useRef<HTMLDivElement>(null);
+  const pendingSpeechRef = useRef<string | null>(null);
+
+  // Vitals measurement state
+  const [vitalsReady, setVitalsReady] = useState(false);
+  const [vitalsBp, setVitalsBp] = useState<string | null>(null);
+  const [vitalsTemp, setVitalsTemp] = useState<string | null>(null);
+  const [vitalsSpo2, setVitalsSpo2] = useState<string | null>(null);
+  const [vitalsMeasuring, setVitalsMeasuring] = useState<'bp' | 'temp' | 'spo2' | null>(null);
 
   const step = STEPS[stepIndex];
   const isSpeaking = phase === 'avatar_speaking';
@@ -277,6 +290,36 @@ export default function AvatarConversationPage() {
     setPhase('confirming');
   }
 
+  // ── Vitals measurement sequence ──
+  async function handleVitalsMeasure() {
+    setVitalsReady(true);
+    try {
+      setVitalsMeasuring('bp');
+      const bp = await api.triggerMeasurement(sessionId, 'BLOOD_PRESSURE');
+      const bpData = bp.data as unknown as Record<string, number>;
+      setVitalsBp(`${bpData.systolic ?? '—'}/${bpData.diastolic ?? '—'}`);
+
+      setVitalsMeasuring('temp');
+      const temp = await api.triggerMeasurement(sessionId, 'TEMPERATURE');
+      const tempData = temp.data as unknown as Record<string, number>;
+      setVitalsTemp(`${tempData.temperature ?? '—'}°C`);
+
+      setVitalsMeasuring('spo2');
+      const spo2 = await api.triggerMeasurement(sessionId, 'OXIMETER');
+      const spo2Data = spo2.data as unknown as Record<string, number>;
+      setVitalsSpo2(`${spo2Data.spo2 ?? '—'}%`);
+    } catch { /* show what we have, continue */ }
+    setVitalsMeasuring(null);
+  }
+
+  async function handleVitalsDone() {
+    setPhase('processing');
+    const speech = pendingSpeechRef.current;
+    pendingSpeechRef.current = null;
+    if (speech) await getAvatarManager()?.speak(speech);
+    router.push(`/booth/${sessionId}/results`);
+  }
+
   // ── Submit ──
   async function submitAnswer(answer: string) {
     if (!answer.trim()) { setError('Please provide an answer before continuing.'); return; }
@@ -293,6 +336,10 @@ export default function AvatarConversationPage() {
         if (avatar_speech_text) await getAvatarManager()?.speak(avatar_speech_text);
         router.push(`/booth/${sessionId}/results`);
         return;
+      }
+      // Store results speech to play after vitals step if the next step is vitals
+      if (STEPS[stepIndex + 1]?.inputType === 'vitals') {
+        pendingSpeechRef.current = avatar_speech_text || null;
       }
       // Thinking state before advancing to next question
       setPhase('thinking');
@@ -788,6 +835,71 @@ export default function AvatarConversationPage() {
                     </button>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* ── Vitals step ── */}
+            {step?.inputType === 'vitals' && phase !== 'processing' && (
+              <div className="fade-up" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {/* Device rows */}
+                {[
+                  { key: 'bp' as const, label: 'Blood Pressure', unit: 'mmHg', value: vitalsBp, icon: '🫀' },
+                  { key: 'temp' as const, label: 'Temperature', unit: '°C', value: vitalsTemp, icon: '🌡️' },
+                  { key: 'spo2' as const, label: 'Oxygen Saturation', unit: '%', value: vitalsSpo2, icon: '💧' },
+                ].map(({ key, label, unit, value, icon }) => (
+                  <div key={key} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    background: 'var(--color-dash-card)',
+                    border: `1px solid ${vitalsMeasuring === key ? 'rgba(9,246,238,0.5)' : value ? 'rgba(54,201,197,0.3)' : 'rgba(9,246,238,0.12)'}`,
+                    borderRadius: 14, padding: '14px 18px',
+                    transition: 'border-color 0.3s',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 20 }}>{icon}</span>
+                      <div>
+                        <p style={{ color: '#e0fffe', fontSize: 13, fontWeight: 600, margin: 0 }}>{label}</p>
+                        <p style={{ color: 'rgba(9,246,238,0.4)', fontSize: 10, fontFamily: 'monospace', margin: 0 }}>{unit}</p>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      {vitalsMeasuring === key ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#09f6ee', animation: 'status-dot 0.8s ease-in-out infinite' }} />
+                          <span style={{ color: '#09f6ee', fontSize: 11, fontWeight: 700 }}>Measuring…</span>
+                        </div>
+                      ) : value ? (
+                        <span style={{ color: '#36c9c5', fontSize: 16, fontWeight: 900, fontFamily: 'monospace' }}>{value}</span>
+                      ) : (
+                        <span style={{ color: 'rgba(9,246,238,0.25)', fontSize: 11 }}>Pending</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Action button */}
+                {!vitalsReady ? (
+                  <button
+                    onClick={handleVitalsMeasure}
+                    style={{
+                      background: 'linear-gradient(135deg, #36c9c5, #09f6ee)',
+                      border: 'none', borderRadius: 14, padding: '16px 0',
+                      color: '#051414', fontSize: 15, fontWeight: 800, cursor: 'pointer',
+                    }}
+                  >
+                    ▶ Start Measurements
+                  </button>
+                ) : vitalsMeasuring === null && (vitalsBp || vitalsTemp || vitalsSpo2) ? (
+                  <button
+                    onClick={handleVitalsDone}
+                    style={{
+                      background: 'linear-gradient(135deg, #36c9c5, #09f6ee)',
+                      border: 'none', borderRadius: 14, padding: '16px 0',
+                      color: '#051414', fontSize: 15, fontWeight: 800, cursor: 'pointer',
+                    }}
+                  >
+                    ✓ View My Results →
+                  </button>
+                ) : null}
               </div>
             )}
 

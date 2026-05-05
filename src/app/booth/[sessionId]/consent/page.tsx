@@ -21,6 +21,7 @@ const ALL_TTS_TEXTS = [
   'On a scale of 1 to 10, how severe would you say your symptoms are right now? And how long have you had them?',
   'Are you experiencing any other symptoms — such as fever, difficulty breathing, chest tightness, dizziness, or nausea?',
   'Do you have any known medical conditions like diabetes, heart disease, or high blood pressure? Are you on any blood thinners or regular medications?',
+  'Excellent! Finally, I\'d like to take a few quick measurements — blood pressure, temperature, and oxygen level. These help me give you the most accurate assessment. Please tap Ready when you\'re comfortable.',
 ];
 
 const CONSENT_POINTS = [
