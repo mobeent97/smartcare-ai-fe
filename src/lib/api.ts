@@ -12,12 +12,48 @@ class ApiClient {
 
   constructor() {
     this.client = axios.create({ baseURL: BASE_URL });
+
     this.client.interceptors.request.use((config) => {
       if (this.accessToken) {
         config.headers.Authorization = `Bearer ${this.accessToken}`;
       }
       return config;
     });
+
+    // JWT auto-refresh on 401 — avoids circular import by lazily importing auth store
+    this.client.interceptors.response.use(
+      (res) => res,
+      async (error) => {
+        const original = error.config;
+        if (error.response?.status === 401 && !original._retry) {
+          original._retry = true;
+          try {
+            // Read refresh token from persisted Zustand state in localStorage
+            const stored = JSON.parse(
+              (typeof localStorage !== 'undefined' && localStorage.getItem('smartcare-auth')) || '{}'
+            );
+            const refresh = stored?.state?.refreshToken;
+            if (!refresh) throw new Error('no refresh token');
+
+            const res = await axios.post(`${BASE_URL}/auth/token/refresh/`, { refresh });
+            const newAccess: string = res.data.data.access;
+            this.setAccessToken(newAccess);
+            original.headers.Authorization = `Bearer ${newAccess}`;
+
+            // Update store without importing at module level (breaks circular dep)
+            const { useAuthStore } = await import('@/store/auth');
+            useAuthStore.getState().setTokens(newAccess, refresh);
+
+            return this.client(original);
+          } catch {
+            const { useAuthStore } = await import('@/store/auth');
+            useAuthStore.getState().logout();
+            if (typeof window !== 'undefined') window.location.href = '/login';
+          }
+        }
+        return Promise.reject(error);
+      }
+    );
   }
 
   setAccessToken(token: string) {
@@ -75,6 +111,20 @@ class ApiClient {
     const res = await this.client.get<ApiResponse<unknown>>('/triage/avatar/session/status/', {
       params: { akool_session_id: akoolSessionId },
     });
+    return res.data;
+  }
+
+  async recordConsent(sessionId: string) {
+    const res = await this.client.post<ApiResponse<{ consented: boolean }>>(
+      `/triage/sessions/${sessionId}/consent/`
+    );
+    return res.data;
+  }
+
+  async completeTriage(sessionId: string) {
+    const res = await this.client.post<ApiResponse<TriageSession>>(
+      `/triage/sessions/${sessionId}/complete/`
+    );
     return res.data;
   }
 

@@ -8,6 +8,7 @@ import { useBoothStore } from '@/store/booth';
 import { BoothLayout } from '@/components/common/BoothLayout';
 import { AvatarPanel } from '@/components/booth/AvatarPanel';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { EmergencyFab } from '@/components/booth/EmergencyFab';
 import type { DeviceMeasurement } from '@/types/api';
 
 const STEPS = [
@@ -96,6 +97,7 @@ export default function VitalsMeasuringPage() {
           <p style={{ color: '#36c9c5', fontSize: 14, textAlign: 'center' }}>{statusText}</p>
         </div>
       </div>
+      <EmergencyFab sessionId={sessionId} />
     </BoothLayout>
   );
 }

@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { prefetchTts, prewarmAudio } from '@/lib/video-avatar';
+import { api } from '@/lib/api';
 
 // All audio prefetched in parallel while user reads consent
 const AVATAR_INTRO =
@@ -43,7 +44,8 @@ export default function ConsentPage() {
 
   function handleAgree() {
     setAgreed(true);
-    prewarmAudio(); // warm up browser audio subsystem on user gesture
+    prewarmAudio();
+    api.recordConsent(sessionId).catch(() => {}); // fire-and-forget, don't block navigation
     router.push(`/booth/${sessionId}/avatar`);
   }
 

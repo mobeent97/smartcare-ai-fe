@@ -5,6 +5,7 @@ import { useRouter, useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useBoothStore } from '@/store/booth';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { EmergencyFab } from '@/components/booth/EmergencyFab';
 import type { TriageSession } from '@/types/api';
 
 /* ─── CTAS config ────────────────────────────────────────────── */
@@ -519,6 +520,7 @@ export default function TriageResultsPage() {
           </div>
 
         </main>
+        <EmergencyFab sessionId={sessionId} />
       </div>
     </>
   );

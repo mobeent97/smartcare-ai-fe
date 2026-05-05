@@ -295,7 +295,12 @@ export default function ManualTriagePage() {
     setSpo2Loading(false);
   }
 
-  function handleFinish() {
+  async function handleFinish() {
+    setLoading(true);
+    try {
+      await api.completeTriage(sessionId);
+    } catch { /* continue to results regardless */ }
+    setLoading(false);
     router.push(`/booth/${sessionId}/results`);
   }
 
@@ -561,6 +566,7 @@ export default function ManualTriagePage() {
           onChange={(e) => setComplaint(e.target.value)}
           placeholder="Describe your concern in your own words… e.g. 'I have a sharp pain in my chest since this morning'"
           rows={3}
+          maxLength={500}
           className="w-full rounded-xl p-4 text-sm resize-none"
           style={{
             background: 'var(--color-dash-card)',
