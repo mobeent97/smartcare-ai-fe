@@ -12,6 +12,7 @@ type Phase =
   | 'listening'
   | 'confirming'
   | 'processing'
+  | 'thinking'
   | 'tap_choice'
   | 'complete';
 
@@ -39,12 +40,22 @@ const STEPS: StepConfig[] = [
   },
   {
     stepName: 'demographics',
-    question: 'How old are you, and what is your biological sex? For example: "I am 45 years old, male."',
+    question: 'What is your first name, age, and sex? For example: "My name is Sarah, I am 32 years old, female."',
     inputType: 'voice',
   },
   {
     stepName: 'symptom_detail',
     question: 'On a scale of 1 to 10, how severe would you say your symptoms are right now? And how long have you had them?',
+    inputType: 'voice',
+  },
+  {
+    stepName: 'associated_symptoms',
+    question: 'Are you experiencing any other symptoms — such as fever, difficulty breathing, chest tightness, dizziness, or nausea?',
+    inputType: 'voice',
+  },
+  {
+    stepName: 'medical_history',
+    question: 'Do you have any known medical conditions like diabetes, heart disease, or high blood pressure? Are you on any blood thinners or regular medications?',
     inputType: 'voice',
   },
 ];
@@ -118,12 +129,13 @@ function StepDots({ total, current }: { total: number; current: number }) {
 
 // ─── Waveform ─────────────────────────────────────────────────────────────────
 
-function Waveform({ active }: { active: boolean }) {
+function Waveform({ active, containerRef }: { active: boolean; containerRef?: React.RefObject<HTMLDivElement | null> }) {
   return (
-    <div className="flex items-end justify-center gap-[3px]" style={{ height: 32 }}>
+    <div ref={containerRef} className="flex items-end justify-center gap-[3px]" style={{ height: 32 }}>
       {Array.from({ length: 16 }).map((_, i) => (
         <div
           key={i}
+          data-wv={i}
           style={{
             width: 3,
             borderRadius: 2,
@@ -155,8 +167,10 @@ export default function AvatarConversationPage() {
   const [sttSupported, setSttSupported] = useState(true);
   const [fallbackText, setFallbackText] = useState('');
   const [showFallback, setShowFallback] = useState(false);
+  const [subtitle, setSubtitle] = useState('');
 
   const recognitionRef = useRef<ISpeechRecognition | null>(null);
+  const waveformRef = useRef<HTMLDivElement>(null);
 
   const step = STEPS[stepIndex];
   const isSpeaking = phase === 'avatar_speaking';
@@ -168,6 +182,19 @@ export default function AvatarConversationPage() {
 
     const mgr = new VideoAvatarManager({
       onStateChange: (s) => { if (!cancelled) setVideoState(s); },
+      onWaveform: (data) => {
+        const div = waveformRef.current;
+        if (!div) return;
+        const bars = div.querySelectorAll<HTMLElement>('[data-wv]');
+        const step = Math.floor(data.length / bars.length);
+        bars.forEach((bar, i) => {
+          const db = data[i * step] ?? -100;
+          const norm = Math.max(0, Math.min(1, (db + 70) / 70));
+          bar.style.height = `${4 + norm * 24}px`;
+          bar.style.animationName = 'none';
+        });
+      },
+      onSubtitle: (text) => { if (!cancelled) setSubtitle(text); },
     });
 
     (async () => {
@@ -190,6 +217,7 @@ export default function AvatarConversationPage() {
     setTranscript('');
     setInterimTranscript('');
     setError('');
+    setSubtitle('');
 
     (async () => {
       const mgr = getAvatarManager();
@@ -266,6 +294,9 @@ export default function AvatarConversationPage() {
         router.push(`/booth/${sessionId}/results`);
         return;
       }
+      // Thinking state before advancing to next question
+      setPhase('thinking');
+      await new Promise(r => setTimeout(r, 1400));
       setStepIndex((i) => i + 1);
     } catch {
       setError('Something went wrong. Please try again.');
@@ -301,6 +332,10 @@ export default function AvatarConversationPage() {
         @keyframes video-glow {
           0%,100% { box-shadow: 0 0 30px 6px rgba(9,246,238,0.12), 0 0 60px 12px rgba(9,246,238,0.06); }
           50%      { box-shadow: 0 0 40px 10px rgba(9,246,238,0.22), 0 0 80px 20px rgba(9,246,238,0.1); }
+        }
+        @keyframes think-dot {
+          0%,80%,100% { transform:scale(0.6); opacity:0.4; }
+          40%          { transform:scale(1.1); opacity:1; }
         }
         .fade-up  { animation: fade-up 0.4s ease both; }
         .mic-live { animation: mic-pulse 1.2s ease-in-out infinite; }
@@ -382,43 +417,57 @@ export default function AvatarConversationPage() {
               pointerEvents: 'none',
             }} />
 
-            {/* Video card */}
-            <div style={{
-              width: 'min(380px, 90vw)',
-              height: 'min(460px, 52vw)',
-              minHeight: 260,
-              borderRadius: 28,
-              overflow: 'hidden',
-              border: '2px solid rgba(9,246,238,0.35)',
-              background: 'var(--color-dash-card)',
-              position: 'relative',
-              animation: 'video-glow 3s ease-in-out infinite',
-            }}>
-              {/* Idle loop */}
+            {/* Video card — tap to interrupt while speaking */}
+            <div
+              onClick={() => {
+                if (phase === 'avatar_speaking') {
+                  getAvatarManager()?.interrupt();
+                  setSubtitle('');
+                  setPhase('listening');
+                }
+              }}
+              style={{
+                width: 'min(380px, 90vw)',
+                height: 'min(460px, 52vw)',
+                minHeight: 260,
+                borderRadius: 28,
+                overflow: 'hidden',
+                border: '2px solid rgba(9,246,238,0.35)',
+                background: 'var(--color-dash-card)',
+                position: 'relative',
+                animation: 'video-glow 3s ease-in-out infinite',
+                cursor: phase === 'avatar_speaking' ? 'pointer' : 'default',
+              }}>
+
+              {/* Crossfade videos using opacity */}
               <video
                 src="/avatar/idle.mp4"
                 autoPlay loop muted playsInline
                 style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  display: videoState === 'idle' ? 'block' : 'none',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'idle' ? 1 : 0,
+                  transition: 'opacity 0.15s ease',
                 }}
               />
-              {/* Speaking loop */}
               <video
                 src="/avatar/speaking.mp4"
                 autoPlay loop muted playsInline
                 style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  display: videoState === 'speaking' ? 'block' : 'none',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'speaking' ? 1 : 0,
+                  transition: 'opacity 0.15s ease',
                 }}
               />
-              {/* Listening loop */}
               <video
                 src="/avatar/listening.mp4"
                 autoPlay loop muted playsInline
                 style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  display: videoState === 'listening' ? 'block' : 'none',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'listening' ? 1 : 0,
+                  transition: 'opacity 0.15s ease',
                 }}
               />
 
@@ -431,6 +480,7 @@ export default function AvatarConversationPage() {
                 borderRadius: 20,
                 padding: '4px 10px',
                 backdropFilter: 'blur(8px)',
+                zIndex: 2,
               }}>
                 <span style={{
                   width: 6, height: 6, borderRadius: '50%',
@@ -443,11 +493,46 @@ export default function AvatarConversationPage() {
                 </span>
               </div>
 
+              {/* Tap-to-interrupt hint */}
+              {phase === 'avatar_speaking' && (
+                <div style={{
+                  position: 'absolute', top: 12, left: 12,
+                  background: 'rgba(5,20,20,0.65)',
+                  border: '1px solid rgba(9,246,238,0.2)',
+                  borderRadius: 12,
+                  padding: '3px 9px',
+                  backdropFilter: 'blur(6px)',
+                  zIndex: 2,
+                }}>
+                  <span style={{ color: 'rgba(9,246,238,0.55)', fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                    Tap to interrupt
+                  </span>
+                </div>
+              )}
+
+              {/* Live subtitles */}
+              {subtitle && phase === 'avatar_speaking' && (
+                <div style={{
+                  position: 'absolute', bottom: 12, left: 12, right: 12,
+                  background: 'rgba(5,20,20,0.82)',
+                  border: '1px solid rgba(9,246,238,0.15)',
+                  borderRadius: 8,
+                  padding: '6px 10px',
+                  backdropFilter: 'blur(8px)',
+                  zIndex: 2,
+                }}>
+                  <p style={{ color: '#e0fffe', fontSize: 11, lineHeight: 1.4, margin: 0, textAlign: 'center' }}>
+                    {subtitle}
+                  </p>
+                </div>
+              )}
+
               {/* Gradient overlay bottom */}
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0, height: 80,
                 background: 'linear-gradient(to top, rgba(5,20,20,0.7) 0%, transparent 100%)',
                 pointerEvents: 'none',
+                zIndex: 1,
               }} />
             </div>
 
@@ -483,7 +568,9 @@ export default function AvatarConversationPage() {
                     ? 'Listening…'
                     : phase === 'processing'
                       ? 'Processing…'
-                      : 'Nurse AI'}
+                      : phase === 'thinking'
+                        ? 'Thinking…'
+                        : 'Nurse AI'}
               </span>
             </div>
           </div>
@@ -599,7 +686,7 @@ export default function AvatarConversationPage() {
                       )}
                     </button>
 
-                    <Waveform active={phase === 'listening'} />
+                    <Waveform active={phase === 'listening'} containerRef={waveformRef} />
 
                     <p style={{
                       color: phase === 'listening' ? '#09f6ee' : 'rgba(9,246,238,0.45)',
@@ -714,6 +801,19 @@ export default function AvatarConversationPage() {
                   borderRadius: '50%',
                   animation: 'spin 0.9s linear infinite',
                 }} />
+              </div>
+            )}
+
+            {/* Thinking state (3-dot pulse) */}
+            {phase === 'thinking' && (
+              <div className="fade-up" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, padding: '14px 0' }}>
+                {[0, 1, 2].map((i) => (
+                  <div key={i} style={{
+                    width: 10, height: 10, borderRadius: '50%',
+                    background: '#09f6ee',
+                    animation: `think-dot 1.2s ease-in-out ${i * 0.18}s infinite`,
+                  }} />
+                ))}
               </div>
             )}
 

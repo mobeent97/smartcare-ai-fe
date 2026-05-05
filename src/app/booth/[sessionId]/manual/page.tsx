@@ -7,9 +7,9 @@ import { useBoothStore } from '@/store/booth';
 import type { DeviceMeasurement } from '@/types/api';
 
 /* ─── Types ──────────────────────────────────────────────────── */
-type Step = 'consent' | 'emergency' | 'complaint' | 'pain' | 'vitals';
-const STEPS: Step[] = ['consent', 'emergency', 'complaint', 'pain', 'vitals'];
-const STEP_LABELS = ['Consent', 'Safety Check', 'Your Complaint', 'Pain Level', 'Vital Signs'];
+type Step = 'consent' | 'demographics' | 'emergency' | 'complaint' | 'pain' | 'vitals';
+const STEPS: Step[] = ['consent', 'demographics', 'emergency', 'complaint', 'pain', 'vitals'];
+const STEP_LABELS = ['Consent', 'About You', 'Safety Check', 'Your Complaint', 'Pain Level', 'Vital Signs'];
 
 /* ─── Constants ──────────────────────────────────────────────── */
 const COMPLAINT_CHIPS = [
@@ -170,6 +170,11 @@ export default function ManualTriagePage() {
   const [step, setStep] = useState<Step>('consent');
   const [loading, setLoading] = useState(false);
 
+  // Demographics
+  const [patientName, setPatientName] = useState('');
+  const [patientAge, setPatientAge] = useState('');
+  const [patientSex, setPatientSex] = useState('');
+
   // Form data
   const [complaint, setComplaint] = useState('');
   const [painLevel, setPainLevel] = useState<number | null>(null);
@@ -197,6 +202,26 @@ export default function ManualTriagePage() {
 
   function addChip(chip: string) {
     setComplaint((prev) => prev ? `${prev}, ${chip.toLowerCase()}` : chip.toLowerCase());
+  }
+
+  async function handleDemographics() {
+    if (!patientName.trim() || !patientAge) return;
+    setLoading(true);
+    try {
+      await api.updatePatientInfo(sessionId, {
+        name: patientName.trim(),
+        age: Number(patientAge),
+        sex: patientSex,
+      });
+      // Also record as a triage answer so it appears in the dashboard answers tab
+      await api.submitAnswer(
+        sessionId,
+        'demographics',
+        `${patientName.trim()}, ${patientAge} years old, ${patientSex || 'not specified'}`
+      );
+    } catch { /* continue regardless */ }
+    setLoading(false);
+    setStep('emergency');
   }
 
   async function handleEmergency(answer: 'yes' | 'no') {
@@ -281,6 +306,114 @@ export default function ManualTriagePage() {
 
   /* ── Step Content ── */
 
+  function renderDemographics() {
+    const SEX_OPTIONS = [
+      { value: 'male', label: 'Male' },
+      { value: 'female', label: 'Female' },
+      { value: 'other', label: 'Other' },
+      { value: '', label: 'Prefer not to say' },
+    ];
+    const canContinue = patientName.trim().length > 0 && patientAge.length > 0 && Number(patientAge) > 0;
+
+    return (
+      <div className="flex flex-col gap-5">
+        <div className="text-center">
+          <div className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4"
+            style={{ background: 'rgba(9,246,238,0.08)', border: '1px solid rgba(9,246,238,0.2)' }}>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#09f6ee" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+          </div>
+          <h2 className="font-black text-2xl mb-2" style={{ color: 'var(--color-text-primary)', fontFamily: 'monospace' }}>
+            About You
+          </h2>
+          <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+            Helps your care team identify and address you
+          </p>
+        </div>
+
+        <Card>
+          <div className="flex flex-col gap-4">
+            {/* Name */}
+            <div>
+              <label className="block text-xs font-mono uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-muted)' }}>
+                First Name <span style={{ color: '#09f6ee' }}>*</span>
+              </label>
+              <input
+                type="text"
+                value={patientName}
+                onChange={(e) => setPatientName(e.target.value)}
+                placeholder="e.g. Sarah"
+                autoComplete="given-name"
+                className="w-full rounded-xl px-4 py-3 text-base"
+                style={{
+                  background: 'var(--color-dash-surface)',
+                  border: `1px solid ${patientName.trim() ? 'rgba(9,246,238,0.4)' : 'rgba(21,81,80,0.6)'}`,
+                  color: 'var(--color-text-primary)',
+                  outline: 'none',
+                  transition: 'border-color 0.2s',
+                }}
+              />
+            </div>
+
+            {/* Age */}
+            <div>
+              <label className="block text-xs font-mono uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-muted)' }}>
+                Age <span style={{ color: '#09f6ee' }}>*</span>
+              </label>
+              <input
+                type="number"
+                value={patientAge}
+                onChange={(e) => setPatientAge(e.target.value)}
+                placeholder="e.g. 32"
+                min={1}
+                max={120}
+                className="w-full rounded-xl px-4 py-3 text-base"
+                style={{
+                  background: 'var(--color-dash-surface)',
+                  border: `1px solid ${patientAge && Number(patientAge) > 0 ? 'rgba(9,246,238,0.4)' : 'rgba(21,81,80,0.6)'}`,
+                  color: 'var(--color-text-primary)',
+                  outline: 'none',
+                  transition: 'border-color 0.2s',
+                }}
+              />
+            </div>
+
+            {/* Sex */}
+            <div>
+              <label className="block text-xs font-mono uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-muted)' }}>
+                Biological Sex
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {SEX_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.label}
+                    type="button"
+                    onClick={() => setPatientSex(opt.value)}
+                    className="rounded-xl py-3 text-sm font-semibold transition-all"
+                    style={{
+                      background: patientSex === opt.value ? 'rgba(9,246,238,0.12)' : 'var(--color-dash-surface)',
+                      border: `1.5px solid ${patientSex === opt.value ? 'rgba(9,246,238,0.5)' : 'rgba(21,81,80,0.5)'}`,
+                      color: patientSex === opt.value ? '#09f6ee' : 'var(--color-text-secondary)',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </Card>
+
+        <PrimaryBtn onClick={handleDemographics} disabled={!canContinue} loading={loading}>
+          Continue →
+        </PrimaryBtn>
+      </div>
+    );
+  }
+
   function renderConsent() {
     return (
       <div className="flex flex-col gap-5">
@@ -326,7 +459,7 @@ export default function ManualTriagePage() {
           ))}
         </Card>
 
-        <PrimaryBtn onClick={() => setStep('emergency')}>
+        <PrimaryBtn onClick={() => setStep('demographics')}>
           I Consent & Continue →
         </PrimaryBtn>
       </div>
@@ -581,6 +714,7 @@ export default function ManualTriagePage() {
 
   const stepRenderers: Record<Step, () => React.ReactNode> = {
     consent: renderConsent,
+    demographics: renderDemographics,
     emergency: renderEmergency,
     complaint: renderComplaint,
     pain: renderPain,

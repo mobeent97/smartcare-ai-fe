@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { prefetchTts } from '@/lib/video-avatar';
+import { prefetchTts, prewarmAudio } from '@/lib/video-avatar';
 
 // All audio prefetched in parallel while user reads consent
 const AVATAR_INTRO =
@@ -16,8 +16,10 @@ const ALL_TTS_TEXTS = [
   AVATAR_INTRO,
   'Before we begin — are you experiencing a life-threatening emergency right now? Chest pain, difficulty breathing, severe bleeding, or loss of consciousness?',
   "What is your main reason for visiting today? Please describe what you're experiencing.",
-  'How old are you, and what is your biological sex? For example: "I am 45 years old, male."',
+  'What is your first name, age, and sex? For example: "My name is Sarah, I am 32 years old, female."',
   'On a scale of 1 to 10, how severe would you say your symptoms are right now? And how long have you had them?',
+  'Are you experiencing any other symptoms — such as fever, difficulty breathing, chest tightness, dizziness, or nausea?',
+  'Do you have any known medical conditions like diabetes, heart disease, or high blood pressure? Are you on any blood thinners or regular medications?',
 ];
 
 const CONSENT_POINTS = [
@@ -41,6 +43,7 @@ export default function ConsentPage() {
 
   function handleAgree() {
     setAgreed(true);
+    prewarmAudio(); // warm up browser audio subsystem on user gesture
     router.push(`/booth/${sessionId}/avatar`);
   }
 

@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import type {
   ApiResponse, TriageSession, AvatarSessionResponse,
-  SubmitAnswerResponse, DeviceMeasurement, AuthTokens,
+  SubmitAnswerResponse, DeviceMeasurement, AuthTokens, DashboardMetrics,
 } from '@/types/api';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000/api/v1';
@@ -78,6 +78,14 @@ class ApiClient {
     return res.data;
   }
 
+  async updatePatientInfo(sessionId: string, data: { name: string; age: number; sex: string }) {
+    const res = await this.client.patch<ApiResponse<TriageSession>>(
+      `/triage/sessions/${sessionId}/patient/`,
+      data
+    );
+    return res.data;
+  }
+
   async submitAnswer(sessionId: string, step: string, value: string) {
     const res = await this.client.post<ApiResponse<SubmitAnswerResponse>>(
       `/triage/sessions/${sessionId}/answer/`,
@@ -96,6 +104,11 @@ class ApiClient {
   }
 
   // Dashboard (authenticated)
+  async getMetrics() {
+    const res = await this.client.get<ApiResponse<DashboardMetrics>>('/dashboard/metrics/');
+    return res.data;
+  }
+
   async getQueue() {
     const res = await this.client.get<ApiResponse<TriageSession[]>>('/dashboard/queue/');
     return res.data;

@@ -6,11 +6,38 @@ export interface TriageSession {
   avatar_mode: 'NURSE' | 'DOCTOR';
   red_flags: string[] | null;
   reasoning_summary: string | null;
+  patient_name: string | null;
+  patient_age: number | null;
+  patient_sex: string | null;
+  ctas_assigned_at: string | null;
+  triage_completed_at: string | null;
+  escalated: boolean;
+  routing_specialty: string | null;
   answers?: TriageAnswer[];
   measurements?: DeviceMeasurement[];
   audit_events?: AuditEvent[];
   created_at: string;
   updated_at: string;
+}
+
+export interface DeteriorationAlert {
+  sessionId: string;
+  patientName: string | null;
+  oldCtas: number;
+  newCtas: number;
+  waitMinutes: number;
+  reason: string;
+}
+
+export interface DashboardMetrics {
+  total_sessions: number;
+  avg_triage_time_minutes: number | null;
+  avg_wait_time_minutes: number | null;
+  ctas_distribution: Record<string, number>;
+  red_flag_rate: number;
+  escalation_count: number;
+  escalation_rate: number;
+  specialty_distribution: Record<string, number>;
 }
 
 export interface TriageAnswer {
