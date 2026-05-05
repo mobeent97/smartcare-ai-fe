@@ -87,4 +87,25 @@ export interface ApiResponse<T> {
 export interface AuthTokens {
   access: string;
   refresh: string;
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+}
+
+export interface AdminUser {
+  id: string;
+  email: string;
+  full_name: string;
+  role: string;
+  is_active: boolean;
+  date_joined: string;
+}
+
+export interface MetricsTimeseries {
+  days: number;
+  total_in_period: number;
+  avg_triage_time_minutes: number | null;
+  daily_sessions: { date: string; count: number }[];
+  ctas_breakdown: Record<string, number>;
 }

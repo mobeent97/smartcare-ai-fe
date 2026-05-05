@@ -2,6 +2,7 @@ import axios, { AxiosInstance } from 'axios';
 import type {
   ApiResponse, TriageSession, AvatarSessionResponse,
   SubmitAnswerResponse, DeviceMeasurement, AuthTokens, DashboardMetrics,
+  AdminUser, MetricsTimeseries,
 } from '@/types/api';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000/api/v1';
@@ -166,6 +167,27 @@ class ApiClient {
   // Dashboard (authenticated)
   async getMetrics() {
     const res = await this.client.get<ApiResponse<DashboardMetrics>>('/dashboard/metrics/');
+    return res.data;
+  }
+
+  async getMetricsTimeseries(days = 7) {
+    const res = await this.client.get<ApiResponse<MetricsTimeseries>>(`/dashboard/metrics/timeseries/?days=${days}`);
+    return res.data;
+  }
+
+  // Admin user management
+  async listUsers() {
+    const res = await this.client.get<ApiResponse<AdminUser[]>>('/auth/admin/users/');
+    return res.data;
+  }
+
+  async inviteUser(data: { email: string; full_name: string; role: string }) {
+    const res = await this.client.post<ApiResponse<AdminUser>>('/auth/admin/users/invite/', data);
+    return res.data;
+  }
+
+  async updateUser(userId: string, data: { role?: string; is_active?: boolean; full_name?: string }) {
+    const res = await this.client.patch<ApiResponse<AdminUser>>(`/auth/admin/users/${userId}/`, data);
     return res.data;
   }
 
