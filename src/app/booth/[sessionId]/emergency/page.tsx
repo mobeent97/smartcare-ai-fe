@@ -1,13 +1,18 @@
 'use client';
 
+import { useParams, useRouter } from 'next/navigation';
+
 export default function EmergencyPage() {
+  const { sessionId } = useParams<{ sessionId: string }>();
+  const router = useRouter();
+
   return (
     <div
       className="min-h-screen flex flex-col items-center justify-center ctas-pulse"
       style={{ backgroundColor: '#dc2626' }}
     >
-      <div className="text-center px-8">
-        {/* Cross / Alert icon */}
+      <div className="text-center px-8 w-full max-w-md">
+        {/* Cross icon */}
         <div className="flex justify-center mb-8">
           <svg width="100" height="100" viewBox="0 0 100 100" fill="none">
             <rect x="38" y="10" width="24" height="80" rx="6" fill="white" />
@@ -44,13 +49,31 @@ export default function EmergencyPage() {
             backgroundColor: 'rgba(0,0,0,0.2)',
             borderRadius: 16,
             padding: '16px 24px',
-            display: 'inline-block',
+            marginBottom: 40,
           }}
         >
           <p style={{ color: 'rgba(255,255,255,0.85)', fontSize: 15 }}>
             Do not leave. A nurse will come to you immediately.
           </p>
         </div>
+
+        {/* False alarm back button */}
+        <button
+          onClick={() => router.push(`/booth/${sessionId}`)}
+          style={{
+            background: 'rgba(0,0,0,0.25)',
+            border: '1.5px solid rgba(255,255,255,0.35)',
+            borderRadius: 12,
+            padding: '12px 28px',
+            color: 'rgba(255,255,255,0.75)',
+            fontSize: 14,
+            fontWeight: 600,
+            cursor: 'pointer',
+            letterSpacing: '0.01em',
+          }}
+        >
+          ← This was a mistake — Go back
+        </button>
       </div>
     </div>
   );
