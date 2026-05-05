@@ -48,7 +48,10 @@ class ApiClient {
           } catch {
             const { useAuthStore } = await import('@/store/auth');
             useAuthStore.getState().logout();
-            if (typeof window !== 'undefined') window.location.href = '/login';
+            // Only redirect to login from dashboard pages — never from booth (patient has no account)
+            if (typeof window !== 'undefined' && window.location.pathname.startsWith('/dashboard')) {
+              window.location.href = '/login';
+            }
           }
         }
         return Promise.reject(error);
