@@ -146,7 +146,7 @@ export default function TriageResultsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.getCaseDetail(sessionId)
+    api.getSessionResults(sessionId)
       .then((res) => setSession(res.data))
       .catch(() => {/* show fallback */})
       .finally(() => setLoading(false));

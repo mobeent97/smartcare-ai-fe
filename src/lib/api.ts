@@ -114,6 +114,13 @@ class ApiClient {
     return res.data;
   }
 
+  async getSessionResults(sessionId: string) {
+    const res = await this.client.get<ApiResponse<TriageSession>>(
+      `/triage/sessions/${sessionId}/results/`
+    );
+    return res.data;
+  }
+
   async recordConsent(sessionId: string) {
     const res = await this.client.post<ApiResponse<{ consented: boolean }>>(
       `/triage/sessions/${sessionId}/consent/`
