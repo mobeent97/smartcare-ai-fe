@@ -38,8 +38,13 @@ export default function ConsentPage() {
   const [audioReady, setAudioReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
 
-  // Fire prefetch immediately on mount — runs while user reads consent
+  // Fire prefetch immediately on mount — runs while user reads consent.
+  // Realtime flow uses OpenAI Realtime API for voice; skip AKOOL TTS prefetch.
   useEffect(() => {
+    if (process.env.NEXT_PUBLIC_USE_REALTIME === 'true') {
+      setAudioReady(true);
+      return;
+    }
     prefetchTts(ALL_TTS_TEXTS).then(() => setAudioReady(true));
   }, []);
 
@@ -47,7 +52,8 @@ export default function ConsentPage() {
     setAgreed(true);
     prewarmAudio();
     api.recordConsent(sessionId).catch(() => {}); // fire-and-forget, don't block navigation
-    router.push(`/booth/${sessionId}/avatar`);
+    const useRealtime = process.env.NEXT_PUBLIC_USE_REALTIME === 'true';
+    router.push(`/booth/${sessionId}/${useRealtime ? 'realtime' : 'avatar'}`);
   }
 
   return (

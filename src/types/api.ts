@@ -75,7 +75,10 @@ export interface AvatarSessionResponse {
 
 export interface SubmitAnswerResponse {
   next_step: string;
+  next_question: string | null;
   avatar_speech_text: string;
+  ctas_level: number | null;
+  routing_specialty: string | null;
 }
 
 export interface ApiResponse<T> {

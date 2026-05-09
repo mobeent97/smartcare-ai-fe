@@ -147,12 +147,34 @@ class ApiClient {
     return res.data;
   }
 
-  async submitAnswer(sessionId: string, step: string, value: string) {
+  async submitAnswer(sessionId: string, step: string, value: string, mode?: 'realtime') {
     const res = await this.client.post<ApiResponse<SubmitAnswerResponse>>(
       `/triage/sessions/${sessionId}/answer/`,
-      { step, value }
+      { step, value, ...(mode ? { mode } : {}) }
     );
     return res.data;
+  }
+
+  async getDeepgramToken(sessionId: string): Promise<{ key: string; ttl: number }> {
+    const res = await this.client.get<ApiResponse<{ key: string; ttl: number }>>(
+      `/triage/stt/token/?session_id=${encodeURIComponent(sessionId)}`
+    );
+    return res.data.data as { key: string; ttl: number };
+  }
+
+  async createRealtimeSession(sessionId: string): Promise<{
+    client_secret: string;
+    expires_at: number;
+    realtime_session_id: string;
+    model: string;
+  }> {
+    const res = await this.client.post<ApiResponse<{
+      client_secret: string;
+      expires_at: number;
+      realtime_session_id: string;
+      model: string;
+    }>>('/triage/realtime/session/', { session_id: sessionId });
+    return res.data.data;
   }
 
   // Devices

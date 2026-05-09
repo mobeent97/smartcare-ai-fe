@@ -17,7 +17,7 @@ export default function VitalsResultsPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const { measurementResult, avatarStatus } = useBoothStore();
 
-  const readings = measurementResult?.raw_readings ?? {};
+  const readings = (measurementResult?.raw_readings ?? measurementResult ?? {}) as Record<string, number | undefined>;
   const classification = measurementResult?.classification ?? '—';
   const badgeColor = CLASSIFICATION_COLORS[classification] ?? '#9ca3af';
 
