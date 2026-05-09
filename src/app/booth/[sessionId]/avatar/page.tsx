@@ -12,13 +12,14 @@ type Phase =
   | 'listening'
   | 'confirming'
   | 'processing'
+  | 'thinking'
   | 'tap_choice'
   | 'complete';
 
 interface StepConfig {
   stepName: string;
   question: string;
-  inputType: 'voice' | 'tap';
+  inputType: 'voice' | 'tap' | 'vitals';
   tapOptions?: { label: string; value: string; danger?: boolean }[];
 }
 
@@ -39,13 +40,28 @@ const STEPS: StepConfig[] = [
   },
   {
     stepName: 'demographics',
-    question: 'How old are you, and what is your biological sex? For example: "I am 45 years old, male."',
+    question: 'What is your first name, age, and sex? For example: "My name is Sarah, I am 32 years old, female."',
     inputType: 'voice',
   },
   {
     stepName: 'symptom_detail',
     question: 'On a scale of 1 to 10, how severe would you say your symptoms are right now? And how long have you had them?',
     inputType: 'voice',
+  },
+  {
+    stepName: 'associated_symptoms',
+    question: 'Are you experiencing any other symptoms — such as fever, difficulty breathing, chest tightness, dizziness, or nausea?',
+    inputType: 'voice',
+  },
+  {
+    stepName: 'medical_history',
+    question: 'Do you have any known medical conditions like diabetes, heart disease, or high blood pressure? Are you on any blood thinners or regular medications?',
+    inputType: 'voice',
+  },
+  {
+    stepName: 'vitals',
+    question: 'Excellent! Finally, I\'d like to take a few quick measurements — blood pressure, temperature, and oxygen level. These help me give you the most accurate assessment. Please tap Ready when you\'re comfortable.',
+    inputType: 'vitals',
   },
 ];
 
@@ -56,38 +72,78 @@ const INTRO_SCRIPT =
   "Please speak your answers clearly, and take your time — there's no rush. " +
   "Let's get started.";
 
-// ─── Speech Recognition ────────────────────────────────────────────────────────
+// ─── Deepgram STT ─────────────────────────────────────────────────────────────
 
-interface ISpeechRecognition {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  maxAlternatives: number;
-  onresult: ((e: ISpeechRecognitionEvent) => void) | null;
-  onend: (() => void) | null;
-  onerror: ((e: { error?: string }) => void) | null;
-  start: () => void;
-  stop: () => void;
+const DG_WS_URL =
+  'wss://api.deepgram.com/v1/listen' +
+  '?model=nova-2&language=en-US&punctuate=true' +
+  '&interim_results=true&endpointing=700&utterance_end_ms=1000';
+
+interface DeepgramSession {
+  ws: WebSocket;
+  recorder: MediaRecorder;
+  stream: MediaStream;
+  autoStopped: boolean;
 }
 
-interface ISpeechRecognitionEvent {
-  resultIndex: number;
-  results: { isFinal: boolean; [index: number]: { transcript: string } }[];
+async function openDeepgramSession(
+  token: string,
+  onInterim: (t: string) => void,
+  onFinal: (t: string) => void,
+  onAutoStop: () => void,
+  onError: (msg: string) => void,
+): Promise<DeepgramSession> {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ws = new WebSocket(DG_WS_URL, ['token', token]);
+  const session: DeepgramSession = { ws, recorder: null as unknown as MediaRecorder, stream, autoStopped: false };
+
+  await new Promise<void>((resolve, reject) => {
+    ws.onopen = () => resolve();
+    ws.onerror = () => reject(new Error('Deepgram WebSocket failed to open'));
+    setTimeout(() => reject(new Error('Deepgram connection timeout')), 8000);
+  });
+
+  const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
+  session.recorder = recorder;
+
+  ws.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data as string);
+      if (data.type === 'Results') {
+        const text: string = data.channel?.alternatives?.[0]?.transcript ?? '';
+        if (data.is_final) {
+          if (text) onFinal(text);
+          if (data.speech_final && !session.autoStopped) {
+            session.autoStopped = true;
+            onAutoStop();
+          }
+        } else {
+          onInterim(text);
+        }
+      }
+    } catch { /* ignore parse errors */ }
+  };
+
+  ws.onerror = () => onError('Microphone connection lost. Please try again.');
+
+  recorder.addEventListener('dataavailable', (e) => {
+    if (ws.readyState === WebSocket.OPEN && e.data.size > 0) ws.send(e.data);
+  });
+  recorder.start(200);
+
+  return session;
 }
 
-function createRecognition(): ISpeechRecognition | null {
-  const SR =
-    typeof window !== 'undefined'
-      ? (window as unknown as { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown }).SpeechRecognition ??
-        (window as unknown as { webkitSpeechRecognition?: unknown }).webkitSpeechRecognition
-      : null;
-  if (!SR) return null;
-  const r = new (SR as new () => ISpeechRecognition)();
-  r.continuous = false;
-  r.interimResults = true;
-  r.lang = 'en-US';
-  r.maxAlternatives = 1;
-  return r;
+function closeDeepgramSession(session: DeepgramSession | null) {
+  if (!session) return;
+  try { session.recorder.stop(); } catch { /* ignore */ }
+  try { session.stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
+  try {
+    if (session.ws.readyState === WebSocket.OPEN) {
+      session.ws.send(JSON.stringify({ type: 'CloseStream' }));
+      session.ws.close();
+    }
+  } catch { /* ignore */ }
 }
 
 // ─── Step Dots ─────────────────────────────────────────────────────────────────
@@ -118,12 +174,13 @@ function StepDots({ total, current }: { total: number; current: number }) {
 
 // ─── Waveform ─────────────────────────────────────────────────────────────────
 
-function Waveform({ active }: { active: boolean }) {
+function Waveform({ active, containerRef }: { active: boolean; containerRef?: React.RefObject<HTMLDivElement | null> }) {
   return (
-    <div className="flex items-end justify-center gap-[3px]" style={{ height: 32 }}>
+    <div ref={containerRef} className="flex items-end justify-center gap-[3px]" style={{ height: 32 }}>
       {Array.from({ length: 16 }).map((_, i) => (
         <div
           key={i}
+          data-wv={i}
           style={{
             width: 3,
             borderRadius: 2,
@@ -152,11 +209,23 @@ export default function AvatarConversationPage() {
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [error, setError] = useState('');
-  const [sttSupported, setSttSupported] = useState(true);
   const [fallbackText, setFallbackText] = useState('');
   const [showFallback, setShowFallback] = useState(false);
+  const [subtitle, setSubtitle] = useState('');
 
-  const recognitionRef = useRef<ISpeechRecognition | null>(null);
+  const deepgramRef = useRef<DeepgramSession | null>(null);
+  const dgTokenRef = useRef<string | null>(null);
+  const dgTokenExpiresAtRef = useRef<number>(0);
+  const waveformRef = useRef<HTMLDivElement>(null);
+  const pendingSpeechRef = useRef<string | null>(null);
+  const pendingLLMSpeechRef = useRef<string | null>(null);
+
+  // Vitals measurement state
+  const [vitalsReady, setVitalsReady] = useState(false);
+  const [vitalsBp, setVitalsBp] = useState<string | null>(null);
+  const [vitalsTemp, setVitalsTemp] = useState<string | null>(null);
+  const [vitalsSpo2, setVitalsSpo2] = useState<string | null>(null);
+  const [vitalsMeasuring, setVitalsMeasuring] = useState<'bp' | 'temp' | 'spo2' | null>(null);
 
   const step = STEPS[stepIndex];
   const isSpeaking = phase === 'avatar_speaking';
@@ -168,9 +237,27 @@ export default function AvatarConversationPage() {
 
     const mgr = new VideoAvatarManager({
       onStateChange: (s) => { if (!cancelled) setVideoState(s); },
+      onWaveform: (data) => {
+        const div = waveformRef.current;
+        if (!div) return;
+        const bars = div.querySelectorAll<HTMLElement>('[data-wv]');
+        const step = Math.floor(data.length / bars.length);
+        bars.forEach((bar, i) => {
+          const db = data[i * step] ?? -100;
+          const norm = Math.max(0, Math.min(1, (db + 70) / 70));
+          bar.style.height = `${4 + norm * 24}px`;
+          bar.style.animationName = 'none';
+        });
+      },
+      onSubtitle: (text) => { if (!cancelled) setSubtitle(text); },
     });
 
     (async () => {
+      // Prefetch Deepgram token while intro plays. Refresh 30s before expiry.
+      api.getDeepgramToken(sessionId).then((r) => {
+        dgTokenRef.current = r.key;
+        dgTokenExpiresAtRef.current = Date.now() + (r.ttl - 30) * 1000;
+      }).catch(() => {});
       await mgr.speak(INTRO_SCRIPT);
       if (cancelled) return;
       await mgr.speak(STEPS[0].question);
@@ -178,7 +265,7 @@ export default function AvatarConversationPage() {
       setPhase(STEPS[0].inputType === 'tap' ? 'tap_choice' : 'listening');
     })().catch(() => {});
 
-    return () => { cancelled = true; mgr.destroy(); };
+    return () => { cancelled = true; mgr.destroy(); closeDeepgramSession(deepgramRef.current); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
@@ -190,11 +277,15 @@ export default function AvatarConversationPage() {
     setTranscript('');
     setInterimTranscript('');
     setError('');
+    setSubtitle('');
+
+    const speechText = pendingLLMSpeechRef.current || STEPS[stepIndex].question;
+    pendingLLMSpeechRef.current = null;
 
     (async () => {
       const mgr = getAvatarManager();
       if (!mgr) return;
-      await mgr.speak(STEPS[stepIndex].question);
+      await mgr.speak(speechText);
       if (cancelled) return;
       setPhase(STEPS[stepIndex].inputType === 'tap' ? 'tap_choice' : 'listening');
     })().catch(() => {});
@@ -202,51 +293,93 @@ export default function AvatarConversationPage() {
     return () => { cancelled = true; };
   }, [stepIndex]);
 
-  // ── STT support check ──
-  useEffect(() => {
-    setSttSupported(!!createRecognition());
-  }, []);
-
-  // ── Mic ──
-  function startListening() {
-    const r = createRecognition();
-    if (!r) { setShowFallback(true); return; }
+  // ── Mic (Deepgram) ──
+  async function startListening() {
     setTranscript('');
     setInterimTranscript('');
+    setError('');
     setPhase('listening');
     getAvatarManager()?.showListening();
-    r.onresult = (e: ISpeechRecognitionEvent) => {
-      let interim = '';
-      let final = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) final += e.results[i][0].transcript;
-        else interim += e.results[i][0].transcript;
+
+    try {
+      // Refetch if no token or near expiry
+      if (!dgTokenRef.current || Date.now() >= dgTokenExpiresAtRef.current) {
+        const r = await api.getDeepgramToken(sessionId);
+        dgTokenRef.current = r.key;
+        dgTokenExpiresAtRef.current = Date.now() + (r.ttl - 30) * 1000;
       }
-      if (final) setTranscript((prev) => (prev + ' ' + final).trim());
-      setInterimTranscript(interim);
-    };
-    r.onend = () => {
-      getAvatarManager()?.showIdle();
-      setInterimTranscript('');
-      setPhase('confirming');
-    };
-    r.onerror = (e: { error?: string }) => {
-      getAvatarManager()?.showIdle();
-      const code = e?.error;
-      if (code === 'not-allowed' || code === 'service-not-allowed') {
+      const session = await openDeepgramSession(
+        dgTokenRef.current,
+        (interim) => setInterimTranscript(interim),
+        (final) => setTranscript((prev) => (prev + ' ' + final).trim()),
+        () => {
+          // Auto-stop on speech_final
+          closeDeepgramSession(deepgramRef.current);
+          deepgramRef.current = null;
+          getAvatarManager()?.showIdle();
+          setInterimTranscript('');
+          setPhase('confirming');
+        },
+        (msg) => {
+          closeDeepgramSession(deepgramRef.current);
+          deepgramRef.current = null;
+          getAvatarManager()?.showIdle();
+          setError(msg);
+          setShowFallback(true);
+          setPhase('confirming');
+        },
+      );
+      deepgramRef.current = session;
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Microphone error';
+      if (msg.includes('Permission') || msg.includes('NotAllowed') || msg.includes('denied')) {
         setError('Microphone access denied. Please allow microphone permission and try again, or use keyboard input below.');
         setShowFallback(true);
+      } else {
+        setError('Could not connect to voice service. Please use keyboard input below.');
+        setShowFallback(true);
       }
+      getAvatarManager()?.showIdle();
       setPhase('confirming');
-    };
-    recognitionRef.current = r;
-    r.start();
+    }
   }
 
   function stopListening() {
-    recognitionRef.current?.stop();
+    closeDeepgramSession(deepgramRef.current);
+    deepgramRef.current = null;
     getAvatarManager()?.showIdle();
+    setInterimTranscript('');
     setPhase('confirming');
+  }
+
+  // ── Vitals measurement sequence ──
+  async function handleVitalsMeasure() {
+    setVitalsReady(true);
+    try {
+      setVitalsMeasuring('bp');
+      const bp = await api.triggerMeasurement(sessionId, 'BLOOD_PRESSURE');
+      const bpData = bp.data as unknown as Record<string, number>;
+      setVitalsBp(`${bpData.systolic ?? '—'}/${bpData.diastolic ?? '—'}`);
+
+      setVitalsMeasuring('temp');
+      const temp = await api.triggerMeasurement(sessionId, 'TEMPERATURE');
+      const tempData = temp.data as unknown as Record<string, number>;
+      setVitalsTemp(`${tempData.temperature ?? '—'}°C`);
+
+      setVitalsMeasuring('spo2');
+      const spo2 = await api.triggerMeasurement(sessionId, 'OXIMETER');
+      const spo2Data = spo2.data as unknown as Record<string, number>;
+      setVitalsSpo2(`${spo2Data.spo2 ?? '—'}%`);
+    } catch { /* show what we have, continue */ }
+    setVitalsMeasuring(null);
+  }
+
+  async function handleVitalsDone() {
+    setPhase('processing');
+    const speech = pendingSpeechRef.current;
+    pendingSpeechRef.current = null;
+    if (speech) await getAvatarManager()?.speak(speech);
+    router.push(`/booth/${sessionId}/results`);
   }
 
   // ── Submit ──
@@ -266,6 +399,17 @@ export default function AvatarConversationPage() {
         router.push(`/booth/${sessionId}/results`);
         return;
       }
+      // Store LLM-generated speech for next step's useEffect
+      if (avatar_speech_text && STEPS[stepIndex + 1]?.inputType !== 'vitals') {
+        pendingLLMSpeechRef.current = avatar_speech_text;
+      }
+      // Store results speech to play after vitals step if the next step is vitals
+      if (STEPS[stepIndex + 1]?.inputType === 'vitals') {
+        pendingSpeechRef.current = avatar_speech_text || null;
+      }
+      // Thinking state before advancing to next question
+      setPhase('thinking');
+      await new Promise(r => setTimeout(r, 1400));
       setStepIndex((i) => i + 1);
     } catch {
       setError('Something went wrong. Please try again.');
@@ -301,6 +445,10 @@ export default function AvatarConversationPage() {
         @keyframes video-glow {
           0%,100% { box-shadow: 0 0 30px 6px rgba(9,246,238,0.12), 0 0 60px 12px rgba(9,246,238,0.06); }
           50%      { box-shadow: 0 0 40px 10px rgba(9,246,238,0.22), 0 0 80px 20px rgba(9,246,238,0.1); }
+        }
+        @keyframes think-dot {
+          0%,80%,100% { transform:scale(0.6); opacity:0.4; }
+          40%          { transform:scale(1.1); opacity:1; }
         }
         .fade-up  { animation: fade-up 0.4s ease both; }
         .mic-live { animation: mic-pulse 1.2s ease-in-out infinite; }
@@ -382,43 +530,57 @@ export default function AvatarConversationPage() {
               pointerEvents: 'none',
             }} />
 
-            {/* Video card */}
-            <div style={{
-              width: 'min(380px, 90vw)',
-              height: 'min(460px, 52vw)',
-              minHeight: 260,
-              borderRadius: 28,
-              overflow: 'hidden',
-              border: '2px solid rgba(9,246,238,0.35)',
-              background: 'var(--color-dash-card)',
-              position: 'relative',
-              animation: 'video-glow 3s ease-in-out infinite',
-            }}>
-              {/* Idle loop */}
+            {/* Video card — tap to interrupt while speaking */}
+            <div
+              onClick={() => {
+                if (phase === 'avatar_speaking') {
+                  getAvatarManager()?.interrupt();
+                  setSubtitle('');
+                  setPhase('listening');
+                }
+              }}
+              style={{
+                width: 'min(380px, 90vw)',
+                height: 'min(460px, 52vw)',
+                minHeight: 260,
+                borderRadius: 28,
+                overflow: 'hidden',
+                border: '2px solid rgba(9,246,238,0.35)',
+                background: 'var(--color-dash-card)',
+                position: 'relative',
+                animation: 'video-glow 3s ease-in-out infinite',
+                cursor: phase === 'avatar_speaking' ? 'pointer' : 'default',
+              }}>
+
+              {/* Crossfade videos using opacity */}
               <video
                 src="/avatar/idle.mp4"
                 autoPlay loop muted playsInline
                 style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  display: videoState === 'idle' ? 'block' : 'none',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'idle' ? 1 : 0,
+                  transition: 'opacity 0.15s ease',
                 }}
               />
-              {/* Speaking loop */}
               <video
                 src="/avatar/speaking.mp4"
                 autoPlay loop muted playsInline
                 style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  display: videoState === 'speaking' ? 'block' : 'none',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'speaking' ? 1 : 0,
+                  transition: 'opacity 0.15s ease',
                 }}
               />
-              {/* Listening loop */}
               <video
                 src="/avatar/listening.mp4"
                 autoPlay loop muted playsInline
                 style={{
                   width: '100%', height: '100%', objectFit: 'cover',
-                  display: videoState === 'listening' ? 'block' : 'none',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'listening' ? 1 : 0,
+                  transition: 'opacity 0.15s ease',
                 }}
               />
 
@@ -431,6 +593,7 @@ export default function AvatarConversationPage() {
                 borderRadius: 20,
                 padding: '4px 10px',
                 backdropFilter: 'blur(8px)',
+                zIndex: 2,
               }}>
                 <span style={{
                   width: 6, height: 6, borderRadius: '50%',
@@ -443,11 +606,46 @@ export default function AvatarConversationPage() {
                 </span>
               </div>
 
+              {/* Tap-to-interrupt hint */}
+              {phase === 'avatar_speaking' && (
+                <div style={{
+                  position: 'absolute', top: 12, left: 12,
+                  background: 'rgba(5,20,20,0.65)',
+                  border: '1px solid rgba(9,246,238,0.2)',
+                  borderRadius: 12,
+                  padding: '3px 9px',
+                  backdropFilter: 'blur(6px)',
+                  zIndex: 2,
+                }}>
+                  <span style={{ color: 'rgba(9,246,238,0.55)', fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                    Tap to interrupt
+                  </span>
+                </div>
+              )}
+
+              {/* Live subtitles */}
+              {subtitle && phase === 'avatar_speaking' && (
+                <div style={{
+                  position: 'absolute', bottom: 12, left: 12, right: 12,
+                  background: 'rgba(5,20,20,0.82)',
+                  border: '1px solid rgba(9,246,238,0.15)',
+                  borderRadius: 8,
+                  padding: '6px 10px',
+                  backdropFilter: 'blur(8px)',
+                  zIndex: 2,
+                }}>
+                  <p style={{ color: '#e0fffe', fontSize: 11, lineHeight: 1.4, margin: 0, textAlign: 'center' }}>
+                    {subtitle}
+                  </p>
+                </div>
+              )}
+
               {/* Gradient overlay bottom */}
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0, height: 80,
                 background: 'linear-gradient(to top, rgba(5,20,20,0.7) 0%, transparent 100%)',
                 pointerEvents: 'none',
+                zIndex: 1,
               }} />
             </div>
 
@@ -483,7 +681,9 @@ export default function AvatarConversationPage() {
                     ? 'Listening…'
                     : phase === 'processing'
                       ? 'Processing…'
-                      : 'Nurse AI'}
+                      : phase === 'thinking'
+                        ? 'Thinking…'
+                        : 'Nurse AI'}
               </span>
             </div>
           </div>
@@ -599,7 +799,7 @@ export default function AvatarConversationPage() {
                       )}
                     </button>
 
-                    <Waveform active={phase === 'listening'} />
+                    <Waveform active={phase === 'listening'} containerRef={waveformRef} />
 
                     <p style={{
                       color: phase === 'listening' ? '#09f6ee' : 'rgba(9,246,238,0.45)',
@@ -663,7 +863,7 @@ export default function AvatarConversationPage() {
                     onClick={() => setShowFallback(true)}
                     style={{ color: 'rgba(9,246,238,0.3)', fontSize: 11, background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
                   >
-                    {sttSupported ? 'Use keyboard instead' : 'Voice not supported — type here'}
+                    Use keyboard instead
                   </button>
                 )}
 
@@ -704,6 +904,71 @@ export default function AvatarConversationPage() {
               </div>
             )}
 
+            {/* ── Vitals step ── */}
+            {step?.inputType === 'vitals' && phase !== 'processing' && (
+              <div className="fade-up" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                {/* Device rows */}
+                {[
+                  { key: 'bp' as const, label: 'Blood Pressure', unit: 'mmHg', value: vitalsBp, icon: '🫀' },
+                  { key: 'temp' as const, label: 'Temperature', unit: '°C', value: vitalsTemp, icon: '🌡️' },
+                  { key: 'spo2' as const, label: 'Oxygen Saturation', unit: '%', value: vitalsSpo2, icon: '💧' },
+                ].map(({ key, label, unit, value, icon }) => (
+                  <div key={key} style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    background: 'var(--color-dash-card)',
+                    border: `1px solid ${vitalsMeasuring === key ? 'rgba(9,246,238,0.5)' : value ? 'rgba(54,201,197,0.3)' : 'rgba(9,246,238,0.12)'}`,
+                    borderRadius: 14, padding: '14px 18px',
+                    transition: 'border-color 0.3s',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span style={{ fontSize: 20 }}>{icon}</span>
+                      <div>
+                        <p style={{ color: '#e0fffe', fontSize: 13, fontWeight: 600, margin: 0 }}>{label}</p>
+                        <p style={{ color: 'rgba(9,246,238,0.4)', fontSize: 10, fontFamily: 'monospace', margin: 0 }}>{unit}</p>
+                      </div>
+                    </div>
+                    <div style={{ textAlign: 'right' }}>
+                      {vitalsMeasuring === key ? (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#09f6ee', animation: 'status-dot 0.8s ease-in-out infinite' }} />
+                          <span style={{ color: '#09f6ee', fontSize: 11, fontWeight: 700 }}>Measuring…</span>
+                        </div>
+                      ) : value ? (
+                        <span style={{ color: '#36c9c5', fontSize: 16, fontWeight: 900, fontFamily: 'monospace' }}>{value}</span>
+                      ) : (
+                        <span style={{ color: 'rgba(9,246,238,0.25)', fontSize: 11 }}>Pending</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Action button */}
+                {!vitalsReady ? (
+                  <button
+                    onClick={handleVitalsMeasure}
+                    style={{
+                      background: 'linear-gradient(135deg, #36c9c5, #09f6ee)',
+                      border: 'none', borderRadius: 14, padding: '16px 0',
+                      color: '#051414', fontSize: 15, fontWeight: 800, cursor: 'pointer',
+                    }}
+                  >
+                    ▶ Start Measurements
+                  </button>
+                ) : vitalsMeasuring === null && (vitalsBp || vitalsTemp || vitalsSpo2) ? (
+                  <button
+                    onClick={handleVitalsDone}
+                    style={{
+                      background: 'linear-gradient(135deg, #36c9c5, #09f6ee)',
+                      border: 'none', borderRadius: 14, padding: '16px 0',
+                      color: '#051414', fontSize: 15, fontWeight: 800, cursor: 'pointer',
+                    }}
+                  >
+                    ✓ View My Results →
+                  </button>
+                ) : null}
+              </div>
+            )}
+
             {/* Processing */}
             {phase === 'processing' && (
               <div style={{ display: 'flex', justifyContent: 'center', padding: '12px 0' }}>
@@ -714,6 +979,19 @@ export default function AvatarConversationPage() {
                   borderRadius: '50%',
                   animation: 'spin 0.9s linear infinite',
                 }} />
+              </div>
+            )}
+
+            {/* Thinking state (3-dot pulse) */}
+            {phase === 'thinking' && (
+              <div className="fade-up" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, padding: '14px 0' }}>
+                {[0, 1, 2].map((i) => (
+                  <div key={i} style={{
+                    width: 10, height: 10, borderRadius: '50%',
+                    background: '#09f6ee',
+                    animation: `think-dot 1.2s ease-in-out ${i * 0.18}s infinite`,
+                  }} />
+                ))}
               </div>
             )}
 

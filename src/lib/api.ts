@@ -1,7 +1,8 @@
 import axios, { AxiosInstance } from 'axios';
 import type {
   ApiResponse, TriageSession, AvatarSessionResponse,
-  SubmitAnswerResponse, DeviceMeasurement, AuthTokens,
+  SubmitAnswerResponse, DeviceMeasurement, AuthTokens, DashboardMetrics,
+  AdminUser, MetricsTimeseries,
 } from '@/types/api';
 
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000/api/v1';
@@ -12,12 +13,51 @@ class ApiClient {
 
   constructor() {
     this.client = axios.create({ baseURL: BASE_URL });
+
     this.client.interceptors.request.use((config) => {
       if (this.accessToken) {
         config.headers.Authorization = `Bearer ${this.accessToken}`;
       }
       return config;
     });
+
+    // JWT auto-refresh on 401 — avoids circular import by lazily importing auth store
+    this.client.interceptors.response.use(
+      (res) => res,
+      async (error) => {
+        const original = error.config;
+        if (error.response?.status === 401 && !original._retry) {
+          original._retry = true;
+          try {
+            // Read refresh token from persisted Zustand state in localStorage
+            const stored = JSON.parse(
+              (typeof localStorage !== 'undefined' && localStorage.getItem('smartcare-auth')) || '{}'
+            );
+            const refresh = stored?.state?.refreshToken;
+            if (!refresh) throw new Error('no refresh token');
+
+            const res = await axios.post(`${BASE_URL}/auth/token/refresh/`, { refresh });
+            const newAccess: string = res.data.data.access;
+            this.setAccessToken(newAccess);
+            original.headers.Authorization = `Bearer ${newAccess}`;
+
+            // Update store without importing at module level (breaks circular dep)
+            const { useAuthStore } = await import('@/store/auth');
+            useAuthStore.getState().setTokens(newAccess, refresh);
+
+            return this.client(original);
+          } catch {
+            const { useAuthStore } = await import('@/store/auth');
+            useAuthStore.getState().logout();
+            // Only redirect to login from dashboard pages — never from booth (patient has no account)
+            if (typeof window !== 'undefined' && window.location.pathname.startsWith('/dashboard')) {
+              window.location.href = '/login';
+            }
+          }
+        }
+        return Promise.reject(error);
+      }
+    );
   }
 
   setAccessToken(token: string) {
@@ -78,12 +118,63 @@ class ApiClient {
     return res.data;
   }
 
-  async submitAnswer(sessionId: string, step: string, value: string) {
-    const res = await this.client.post<ApiResponse<SubmitAnswerResponse>>(
-      `/triage/sessions/${sessionId}/answer/`,
-      { step, value }
+  async getSessionResults(sessionId: string) {
+    const res = await this.client.get<ApiResponse<TriageSession>>(
+      `/triage/sessions/${sessionId}/results/`
     );
     return res.data;
+  }
+
+  async recordConsent(sessionId: string) {
+    const res = await this.client.post<ApiResponse<{ consented: boolean }>>(
+      `/triage/sessions/${sessionId}/consent/`
+    );
+    return res.data;
+  }
+
+  async completeTriage(sessionId: string) {
+    const res = await this.client.post<ApiResponse<TriageSession>>(
+      `/triage/sessions/${sessionId}/complete/`
+    );
+    return res.data;
+  }
+
+  async updatePatientInfo(sessionId: string, data: { name: string; age: number; sex: string }) {
+    const res = await this.client.patch<ApiResponse<TriageSession>>(
+      `/triage/sessions/${sessionId}/patient/`,
+      data
+    );
+    return res.data;
+  }
+
+  async submitAnswer(sessionId: string, step: string, value: string, mode?: 'realtime') {
+    const res = await this.client.post<ApiResponse<SubmitAnswerResponse>>(
+      `/triage/sessions/${sessionId}/answer/`,
+      { step, value, ...(mode ? { mode } : {}) }
+    );
+    return res.data;
+  }
+
+  async getDeepgramToken(sessionId: string): Promise<{ key: string; ttl: number }> {
+    const res = await this.client.get<ApiResponse<{ key: string; ttl: number }>>(
+      `/triage/stt/token/?session_id=${encodeURIComponent(sessionId)}`
+    );
+    return res.data.data as { key: string; ttl: number };
+  }
+
+  async createRealtimeSession(sessionId: string): Promise<{
+    client_secret: string;
+    expires_at: number;
+    realtime_session_id: string;
+    model: string;
+  }> {
+    const res = await this.client.post<ApiResponse<{
+      client_secret: string;
+      expires_at: number;
+      realtime_session_id: string;
+      model: string;
+    }>>('/triage/realtime/session/', { session_id: sessionId });
+    return res.data.data;
   }
 
   // Devices
@@ -96,6 +187,32 @@ class ApiClient {
   }
 
   // Dashboard (authenticated)
+  async getMetrics() {
+    const res = await this.client.get<ApiResponse<DashboardMetrics>>('/dashboard/metrics/');
+    return res.data;
+  }
+
+  async getMetricsTimeseries(days = 7) {
+    const res = await this.client.get<ApiResponse<MetricsTimeseries>>(`/dashboard/metrics/timeseries/?days=${days}`);
+    return res.data;
+  }
+
+  // Admin user management
+  async listUsers() {
+    const res = await this.client.get<ApiResponse<AdminUser[]>>('/auth/admin/users/');
+    return res.data;
+  }
+
+  async inviteUser(data: { email: string; full_name: string; role: string }) {
+    const res = await this.client.post<ApiResponse<AdminUser>>('/auth/admin/users/invite/', data);
+    return res.data;
+  }
+
+  async updateUser(userId: string, data: { role?: string; is_active?: boolean; full_name?: string }) {
+    const res = await this.client.patch<ApiResponse<AdminUser>>(`/auth/admin/users/${userId}/`, data);
+    return res.data;
+  }
+
   async getQueue() {
     const res = await this.client.get<ApiResponse<TriageSession[]>>('/dashboard/queue/');
     return res.data;

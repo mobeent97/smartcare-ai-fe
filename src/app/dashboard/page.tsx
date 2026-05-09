@@ -20,6 +20,8 @@ import { QueuePanel } from '@/components/dashboard/QueuePanel';
 import { CTASBadge } from '@/components/dashboard/CTASBadge';
 import { VitalCard } from '@/components/dashboard/VitalCard';
 import { EmergencyAlertModal } from '@/components/dashboard/EmergencyAlertModal';
+import { DeteriorationAlertModal } from '@/components/dashboard/DeteriorationAlertModal';
+import { MetricsPanel } from '@/components/dashboard/MetricsPanel';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
 import { CaseHeader } from '@/components/dashboard/CaseHeader';
 import { CaseDetailTabs, type Tab } from '@/components/dashboard/CaseDetailTabs';
@@ -31,7 +33,7 @@ import { SessionTimeline } from '@/components/dashboard/SessionTimeline';
 import { VitalsPanel } from '@/components/dashboard/VitalsPanel';
 import { AnswerList } from '@/components/dashboard/AnswerList';
 import { AuditTimeline } from '@/components/dashboard/AuditTimeline';
-import type { TriageSession, DeviceMeasurement, AuditEvent, TriageAnswer } from '@/types/api';
+import type { TriageSession, DeviceMeasurement, AuditEvent, TriageAnswer, DeteriorationAlert } from '@/types/api';
 
 export default function DashboardPage() {
   return (
@@ -46,8 +48,11 @@ function DashboardInner() {
   const searchParams = useSearchParams();
   const caseParam = searchParams.get('case');
   const { accessToken, _hasHydrated } = useAuthStore();
-  const { queue, setQueue, updateQueueItem, addOrUpdateQueueItem, removeFromQueue, emergencyAlert, setEmergencyAlert, clearEmergencyAlert } =
-    useDashboardStore();
+  const {
+    queue, setQueue, updateQueueItem, addOrUpdateQueueItem, removeFromQueue,
+    emergencyAlert, setEmergencyAlert, clearEmergencyAlert,
+    deteriorationAlert, setDeteriorationAlert, clearDeteriorationAlert,
+  } = useDashboardStore();
 
   const [tab, setTab] = useState<Tab>('summary');
   const [caseDetail, setCaseDetail] = useState<TriageSession | null>(null);
@@ -76,13 +81,16 @@ function DashboardInner() {
       accessToken,
       (sessionId, data) => updateQueueItem(sessionId, data),
       async (alert) => {
-        // Fetch the emergency session and inject into queue before showing modal.
-        // This ensures "View Patient" has a case to display even for brand-new sessions.
         try {
           const res = await api.getCaseDetail(alert.sessionId);
           if (res.data) addOrUpdateQueueItem(res.data);
         } catch { /* show alert anyway */ }
         setEmergencyAlert(alert);
+      },
+      (alert: DeteriorationAlert) => {
+        // Update queue item CTAS badge immediately
+        updateQueueItem(alert.sessionId, { ctas_level: alert.newCtas as 1|2|3|4|5 });
+        setDeteriorationAlert(alert);
       }
     );
     ws.connect();
@@ -169,6 +177,21 @@ function DashboardInner() {
         activeBoothCount={activeCount}
         hasAlert={!!emergencyAlert}
       />
+
+      {/* ── KPI Metrics row ───────────────────────────────────── */}
+      <MetricsPanel />
+
+      {/* ── Deterioration alert (amber, bottom-right toast) ────── */}
+      {deteriorationAlert && (
+        <DeteriorationAlertModal
+          alert={deteriorationAlert}
+          onView={() => {
+            selectCase(deteriorationAlert.sessionId);
+            clearDeteriorationAlert();
+          }}
+          onDismiss={clearDeteriorationAlert}
+        />
+      )}
 
       {/* ── Master / Detail body ───────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">

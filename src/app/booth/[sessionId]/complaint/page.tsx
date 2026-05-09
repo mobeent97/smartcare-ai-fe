@@ -7,6 +7,7 @@ import { useBoothStore } from '@/store/booth';
 import { BoothLayout } from '@/components/common/BoothLayout';
 import { AvatarPanel } from '@/components/booth/AvatarPanel';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { EmergencyFab } from '@/components/booth/EmergencyFab';
 
 const QUICK_CHIPS = ['Chest Pain', 'Headache', 'Fever', 'Nausea', 'Injury', 'Difficulty Breathing'];
 
@@ -111,6 +112,7 @@ export default function ComplaintPage() {
           </button>
         )}
       </div>
+      <EmergencyFab sessionId={sessionId} />
     </BoothLayout>
   );
 }

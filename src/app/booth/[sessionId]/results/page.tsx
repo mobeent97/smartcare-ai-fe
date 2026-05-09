@@ -5,6 +5,7 @@ import { useRouter, useParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useBoothStore } from '@/store/booth';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { EmergencyFab } from '@/components/booth/EmergencyFab';
 import type { TriageSession } from '@/types/api';
 
 /* ─── CTAS config ────────────────────────────────────────────── */
@@ -145,7 +146,7 @@ export default function TriageResultsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.getCaseDetail(sessionId)
+    api.getSessionResults(sessionId)
       .then((res) => setSession(res.data))
       .catch(() => {/* show fallback */})
       .finally(() => setLoading(false));
@@ -167,6 +168,16 @@ export default function TriageResultsPage() {
 
   const route = deriveRouting(ctas, complaint);
   const queueNum = sessionId.slice(-4).toUpperCase();
+  const specialty = session?.routing_specialty ?? null;
+
+  const CTAS_EXPECT: Record<number, string> = {
+    1: 'A nurse is coming to you RIGHT NOW. Do not move from your seat.',
+    2: 'You will be seen within 15 minutes. Stay seated and alert staff immediately if symptoms worsen.',
+    3: 'You will be seen within 30 minutes. Remain in the waiting area and notify staff of any changes.',
+    4: 'You will be seen within 60 minutes. Stay comfortable and let reception know if you feel worse.',
+    5: 'You will be seen within 2 hours. Feel free to sit — reception will call your name.',
+  };
+  const ctasExpect = ctas ? CTAS_EXPECT[ctas] : null;
 
   // Vitals — support both flat and nested raw_readings format
   const vitals = flatReadings(measurementResult);
@@ -319,6 +330,12 @@ export default function TriageResultsPage() {
               style={{ background: 'var(--color-dash-card)', borderColor: ctasCfg ? `${ctasCfg.border}40` : 'rgba(21,81,80,0.5)' }}>
               <div>
                 <p className="text-xs font-mono uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-muted)' }}>Proceed To</p>
+                {specialty && (
+                  <span className="inline-block text-xs font-bold px-2 py-0.5 rounded-full mb-2"
+                    style={{ background: 'rgba(9,246,238,0.1)', border: '1px solid rgba(9,246,238,0.25)', color: '#09f6ee' }}>
+                    {specialty}
+                  </span>
+                )}
                 <div className="flex items-start gap-1.5 mb-2">
                   <span style={{ color: ctasCfg?.border ?? '#09f6ee', marginTop: 2 }}><LocationIcon /></span>
                   <p className="font-bold text-sm leading-tight" style={{ color: 'var(--color-text-primary)' }}>
@@ -463,6 +480,17 @@ export default function TriageResultsPage() {
             </div>
           )}
 
+          {/* ── What to expect ── */}
+          {ctasExpect && (
+            <div className="r-fade-3 rounded-2xl p-4 border flex items-start gap-3"
+              style={{ background: `${ctasCfg?.bg ?? 'rgba(9,246,238,0.04)'}`, borderColor: `${ctasCfg?.border ?? 'rgba(9,246,238,0.2)'}50` }}>
+              <span style={{ fontSize: 20, flexShrink: 0 }}>🕐</span>
+              <p className="text-sm leading-relaxed font-semibold" style={{ color: ctasCfg?.color ?? 'var(--color-text-primary)' }}>
+                {ctasExpect}
+              </p>
+            </div>
+          )}
+
           {/* ── Next Steps ── */}
           <div className="r-fade-4 rounded-2xl p-5 border"
             style={{ background: 'rgba(9,246,238,0.04)', borderColor: 'rgba(9,246,238,0.2)' }}>
@@ -519,6 +547,7 @@ export default function TriageResultsPage() {
           </div>
 
         </main>
+        <EmergencyFab sessionId={sessionId} />
       </div>
     </>
   );

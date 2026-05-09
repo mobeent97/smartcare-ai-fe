@@ -7,6 +7,7 @@ import { useBoothStore } from '@/store/booth';
 import { BoothLayout } from '@/components/common/BoothLayout';
 import { AvatarPanel } from '@/components/booth/AvatarPanel';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
+import { EmergencyFab } from '@/components/booth/EmergencyFab';
 
 // Color gradient from green (1) to red (10)
 const PAIN_COLORS = [
@@ -113,6 +114,7 @@ export default function PainPage() {
           </button>
         )}
       </div>
+      <EmergencyFab sessionId={sessionId} />
     </BoothLayout>
   );
 }
