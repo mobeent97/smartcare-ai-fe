@@ -15,8 +15,6 @@
  * PHI handling: this module logs only event types, never event payloads.
  */
 
-import type { ApiResponse } from '@/types/api';
-
 export interface RealtimeSessionMint {
   client_secret: string;
   expires_at: number;
@@ -32,7 +30,13 @@ export interface RealtimeCallbacks {
   onResponseStart: () => void;
   onSpeakingStart: () => void;
   onSpeakingStop: () => void;
-  onListeningStart: () => void;
+  /** Model finished generating. `hadAudio` = true if the response produced
+   *  spoken output. Use this to schedule a playback-drain timer. */
+  onResponseComplete: (hadAudio: boolean) => void;
+  /** User started talking (VAD). UI should show "listening". */
+  onUserSpeechStart: () => void;
+  /** User stopped talking, model is processing. UI should show "thinking". */
+  onUserSpeechStop: () => void;
   onError: (msg: string) => void;
   onAudioElement: (el: HTMLAudioElement) => void;
 }
@@ -52,6 +56,10 @@ export class RealtimeClient {
   private localStream: MediaStream | null = null;
   private audioEl: HTMLAudioElement | null = null;
   private destroyed = false;
+  // Tracks whether the in-flight response has emitted any audio. Tool-call-only
+  // responses emit response.done with no audio — we must not flip phase to
+  // "listening" in that case (the model will immediately start a new response).
+  private currentResponseHasAudio = false;
 
   constructor(
     private mint: RealtimeSessionMint,
@@ -59,8 +67,21 @@ export class RealtimeClient {
     private tools: ToolDispatcher,
   ) {}
 
+  /** Returns seconds remaining on the ephemeral key. */
+  secondsUntilExpiry(): number {
+    if (!this.mint.expires_at) return Infinity;
+    return Math.floor(this.mint.expires_at - Date.now() / 1000);
+  }
+
   async connect(): Promise<void> {
     if (this.destroyed) throw new Error('client destroyed');
+
+    // Reject obviously stale mints up front — the SDP exchange would 401
+    // anyway, but this gives a clearer error for the page to retry on.
+    const remaining = this.secondsUntilExpiry();
+    if (remaining < 10) {
+      throw new Error(`mint expired or about to expire (${remaining}s remaining)`);
+    }
 
     this.pc = new RTCPeerConnection();
 
@@ -134,18 +155,41 @@ export class RealtimeClient {
 
     switch (type) {
       case 'input_audio_buffer.speech_started':
-        this.callbacks.onListeningStart();
+        this.callbacks.onUserSpeechStart();
+        break;
+      case 'input_audio_buffer.speech_stopped':
+      case 'input_audio_buffer.committed':
+        this.callbacks.onUserSpeechStop();
         break;
       case 'response.created':
+        this.currentResponseHasAudio = false;
         this.callbacks.onResponseStart();
         break;
       case 'response.audio.delta':
+        // Fires for WebSocket transport; for WebRTC the audio rides the RTP
+        // track, not the data channel — see audio_transcript.delta below.
+        this.currentResponseHasAudio = true;
         this.callbacks.onSpeakingStart();
         break;
       case 'response.audio.done':
-      case 'response.done':
-        this.callbacks.onSpeakingStop();
+      case 'response.audio_transcript.done':
+        // Both signal "no more data being generated" — but RTP audio is still
+        // buffered and playing for several seconds after. Do NOT stop phase
+        // here. The page schedules a transcript-length timer in
+        // onResponseComplete to flip phase when playback actually finishes.
         break;
+      case 'response.done': {
+        const hadAudio = this.currentResponseHasAudio;
+        this.currentResponseHasAudio = false;
+        // Tool-call-only responses produce no audio: clear phase immediately.
+        // Audio-bearing responses delegate the stop to the page (it knows the
+        // accumulated transcript length and can estimate playback duration).
+        if (!hadAudio) {
+          this.callbacks.onSpeakingStop();
+        }
+        this.callbacks.onResponseComplete(hadAudio);
+        break;
+      }
       case 'conversation.item.input_audio_transcription.completed': {
         const text = (evt.transcript as string) || '';
         if (text) this.callbacks.onUserTranscript(text, true);
@@ -153,7 +197,14 @@ export class RealtimeClient {
       }
       case 'response.audio_transcript.delta': {
         const delta = (evt.delta as string) || '';
-        if (delta) this.callbacks.onAssistantTranscript(delta);
+        if (delta) {
+          // Over WebRTC this is the reliable "model is now producing speech"
+          // signal — audio bytes never come over the data channel. Mark the
+          // response as audio-bearing AND drive the speaking phase from here.
+          this.currentResponseHasAudio = true;
+          this.callbacks.onSpeakingStart();
+          this.callbacks.onAssistantTranscript(delta);
+        }
         break;
       }
       case 'response.function_call_arguments.done':
@@ -227,18 +278,3 @@ export class RealtimeClient {
   }
 }
 
-export async function mintRealtimeSession(
-  apiBaseUrl: string,
-  sessionId: string,
-): Promise<RealtimeSessionMint> {
-  const resp = await fetch(`${apiBaseUrl}/triage/realtime/session/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ session_id: sessionId }),
-  });
-  if (!resp.ok) {
-    throw new Error(`mint failed: ${resp.status}`);
-  }
-  const body = (await resp.json()) as ApiResponse<RealtimeSessionMint>;
-  return body.data;
-}

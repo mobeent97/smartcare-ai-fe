@@ -144,12 +144,32 @@ export default function TriageResultsPage() {
 
   const [session, setSession] = useState<TriageSession | null>(null);
   const [loading, setLoading] = useState(true);
+  const [queuePos, setQueuePos] = useState<{
+    position: number | null;
+    total_waiting: number | null;
+    specialty: string | null;
+    specialty_position: number | null;
+    specialty_total: number | null;
+  } | null>(null);
 
   useEffect(() => {
     api.getSessionResults(sessionId)
       .then((res) => setSession(res.data))
       .catch(() => {/* show fallback */})
       .finally(() => setLoading(false));
+  }, [sessionId]);
+
+  // Poll queue position every 20s — refreshes as patients ahead get seen.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchPos = () => {
+      api.getQueuePosition(sessionId)
+        .then((p) => { if (!cancelled) setQueuePos(p); })
+        .catch(() => { /* leave previous value */ });
+    };
+    fetchPos();
+    const id = setInterval(fetchPos, 20_000);
+    return () => { cancelled = true; clearInterval(id); };
   }, [sessionId]);
 
   function handleEndSession() {
@@ -167,8 +187,12 @@ export default function TriageResultsPage() {
   const painLevel       = painAnswer ? parseInt(painAnswer.raw_input, 10) : null;
 
   const route = deriveRouting(ctas, complaint);
-  const queueNum = sessionId.slice(-4).toUpperCase();
+  const ticketCode = sessionId.slice(-4).toUpperCase();
   const specialty = session?.routing_specialty ?? null;
+  // Prefer specialty-scoped position when available — it's the number that
+  // matches what the patient sees on the room they walk into.
+  const livePosition = queuePos?.specialty_position ?? queuePos?.position ?? null;
+  const liveTotal = queuePos?.specialty_total ?? queuePos?.total_waiting ?? null;
 
   const CTAS_EXPECT: Record<number, string> = {
     1: 'A nurse is coming to you RIGHT NOW. Do not move from your seat.',
@@ -311,18 +335,79 @@ export default function TriageResultsPage() {
             )}
           </div>
 
+          {/* ── Download PDF (top, easy to find) ── */}
+          <div className="r-fade-1">
+            <button
+              type="button"
+              onClick={async () => {
+                const url = api.getSessionPdfUrl(sessionId);
+                console.log('[pdf] downloading', url);
+                try {
+                  const res = await fetch(url, { method: 'GET', credentials: 'omit' });
+                  console.log('[pdf] response', res.status, res.headers.get('content-type'));
+                  if (!res.ok) {
+                    alert(`PDF download failed: HTTP ${res.status}`);
+                    return;
+                  }
+                  const blob = await res.blob();
+                  const objUrl = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = objUrl;
+                  a.download = `triage-${sessionId.slice(0, 8)}.pdf`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+                } catch (e) {
+                  console.error('[pdf] error', e);
+                  alert(`PDF download failed: ${e instanceof Error ? e.message : 'unknown'}`);
+                }
+              }}
+              style={{
+                width: '100%',
+                minHeight: 56,
+                background: 'linear-gradient(135deg, rgba(9,246,238,0.18), rgba(54,201,197,0.1))',
+                border: '1.5px solid rgba(9,246,238,0.45)',
+                borderRadius: 16,
+                color: '#09f6ee',
+                cursor: 'pointer',
+                fontFamily: 'monospace',
+                fontWeight: 700,
+                fontSize: 14,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 10,
+                letterSpacing: '-0.01em',
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Download Handoff PDF
+            </button>
+          </div>
+
           {/* ── Queue + Routing row ── */}
           <div className="r-fade-1 grid grid-cols-2 gap-4">
-            {/* Queue number */}
+            {/* Queue position */}
             <div className="rounded-2xl p-5 text-center border"
               style={{ background: 'var(--color-dash-card)', borderColor: 'rgba(9,246,238,0.3)' }}>
               <p className="text-xs font-mono uppercase tracking-widest mb-2" style={{ color: 'var(--color-text-muted)' }}>
-                Queue Number
+                {livePosition !== null ? 'Your Position' : 'Ticket'}
               </p>
               <p className="font-black text-4xl font-mono" style={{ color: '#09f6ee', fontFamily: 'monospace', animation: 'queue-pulse 3s ease-in-out infinite', letterSpacing: '-0.02em' }}>
-                #{queueNum}
+                {livePosition !== null ? `#${livePosition}` : `#${ticketCode}`}
               </p>
-              <p className="text-xs mt-2" style={{ color: 'var(--color-text-muted)' }}>Your priority ticket</p>
+              {livePosition !== null && liveTotal !== null ? (
+                <p className="text-xs mt-2" style={{ color: 'var(--color-text-muted)' }}>
+                  of {liveTotal} waiting{queuePos?.specialty_position !== null && queuePos?.specialty ? ` · ${queuePos.specialty}` : ''}
+                </p>
+              ) : (
+                <p className="text-xs mt-2" style={{ color: 'var(--color-text-muted)' }}>Your priority ticket</p>
+              )}
             </div>
 
             {/* Routing destination */}
@@ -521,6 +606,62 @@ export default function TriageResultsPage() {
             This assessment is AI-assisted and has been reviewed by clinical rules.
             All final medical decisions are made by a licensed clinician.
           </p>
+
+          {/* ── Download PDF ── */}
+          <div className="r-fade-5 pt-1">
+            <button
+              type="button"
+              onClick={async () => {
+                const url = api.getSessionPdfUrl(sessionId);
+                console.log('[pdf] downloading', url);
+                try {
+                  const res = await fetch(url, { method: 'GET', credentials: 'omit' });
+                  console.log('[pdf] response', res.status, res.headers.get('content-type'));
+                  if (!res.ok) {
+                    alert(`PDF download failed: HTTP ${res.status}`);
+                    return;
+                  }
+                  const blob = await res.blob();
+                  const objUrl = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = objUrl;
+                  a.download = `triage-${sessionId.slice(0, 8)}.pdf`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+                } catch (e) {
+                  console.error('[pdf] error', e);
+                  alert(`PDF download failed: ${e instanceof Error ? e.message : 'unknown'}`);
+                }
+              }}
+              className="end-btn w-full rounded-2xl font-bold text-sm flex items-center justify-center gap-2.5"
+              style={{
+                minHeight: 52,
+                width: '100%',
+                background: 'rgba(9,246,238,0.08)',
+                border: '1px solid rgba(9,246,238,0.3)',
+                color: '#86dfdc',
+                cursor: 'pointer',
+                fontFamily: 'monospace',
+                letterSpacing: '-0.01em',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 10,
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="7 10 12 15 17 10"/>
+                <line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+              Download PDF Summary
+            </button>
+            <p className="text-xs text-center mt-2" style={{ color: 'var(--color-text-dim)' }}>
+              Show this to reception or attach to your records
+            </p>
+          </div>
 
           {/* ── End Session Button ── */}
           <div className="r-fade-6 pt-2 pb-6">

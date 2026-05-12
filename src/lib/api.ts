@@ -162,6 +162,30 @@ class ApiClient {
     return res.data.data as { key: string; ttl: number };
   }
 
+  /** Returns the absolute PDF download URL — opens in a new tab so the
+   *  browser handles the file save dialog natively. */
+  getSessionPdfUrl(sessionId: string): string {
+    return `${BASE_URL}/triage/sessions/${sessionId}/export/pdf/`;
+  }
+
+  async markUnableToAssess(sessionId: string, reason: string) {
+    const res = await this.client.post<ApiResponse<{
+      id: string; ctas_level: number; status: string; message: string;
+    }>>(`/triage/sessions/${sessionId}/unable-to-assess/`, { reason });
+    return res.data;
+  }
+
+  async getQueuePosition(sessionId: string) {
+    const res = await this.client.get<ApiResponse<{
+      position: number | null;
+      total_waiting: number | null;
+      specialty: string | null;
+      specialty_position: number | null;
+      specialty_total: number | null;
+    }>>(`/triage/sessions/${sessionId}/queue-position/`);
+    return res.data.data;
+  }
+
   async createRealtimeSession(sessionId: string): Promise<{
     client_secret: string;
     expires_at: number;

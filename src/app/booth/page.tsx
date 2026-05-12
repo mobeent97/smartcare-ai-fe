@@ -194,10 +194,11 @@ function ModeCard({ illustration, title, subtitle, features, accentColor, button
 /* ─── Main Page ──────────────────────────────────────────────── */
 export default function BoothWelcomePage() {
   const router = useRouter();
-  const { setSessionId } = useBoothStore();
+  const { setSessionId, setMode } = useBoothStore();
 
   const [avatarState, setAvatarState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [manualState, setManualState] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [unableState, setUnableState] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
 
 
   async function handleAvatarMode() {
@@ -207,8 +208,8 @@ export default function BoothWelcomePage() {
       const res = await api.createTriageSession();
       const sid = res.data.id;
       setSessionId(sid);
-
-      router.push(`/booth/${sid}/consent`);
+      setMode('avatar');
+      router.push(`/booth/${sid}/consent?mode=avatar`);
     } catch {
       setAvatarState('error');
     }
@@ -221,9 +222,26 @@ export default function BoothWelcomePage() {
       const res = await api.createTriageSession();
       const sid = res.data.id;
       setSessionId(sid);
-      router.push(`/booth/${sid}/manual`);
+      setMode('manual');
+      // Manual flow needs consent too — route through the same gate so the
+      // session has consent_given_at recorded for audit/GDPR.
+      router.push(`/booth/${sid}/consent?mode=manual`);
     } catch {
       setManualState('error');
+    }
+  }
+
+  async function handleUnableToAssess() {
+    if (unableState === 'loading' || unableState === 'success') return;
+    setUnableState('loading');
+    try {
+      const res = await api.createTriageSession();
+      const sid = res.data.id;
+      setSessionId(sid);
+      await api.markUnableToAssess(sid, 'Companion-initiated: patient cannot self-respond');
+      setUnableState('success');
+    } catch {
+      setUnableState('error');
     }
   }
 
@@ -382,6 +400,49 @@ export default function BoothWelcomePage() {
               isPrimary={false}
             />
           </div>
+        </div>
+
+        {/* ── Unable to assess (companion-initiated escalation) ── */}
+        <div className="relative z-10 text-center px-6 pb-4">
+          {unableState === 'success' ? (
+            <div className="inline-flex flex-col items-center gap-2 px-5 py-3 rounded-2xl"
+              style={{ background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.4)' }}>
+              <p style={{ color: '#fca5a5', fontWeight: 700, fontSize: 14 }}>
+                🚨 Staff alerted — please remain with the patient
+              </p>
+              <p style={{ color: 'rgba(252,165,165,0.75)', fontSize: 12 }}>
+                A clinician is on the way. Do not move the patient.
+              </p>
+            </div>
+          ) : (
+            <button
+              onClick={handleUnableToAssess}
+              disabled={unableState === 'loading'}
+              style={{
+                background: 'transparent',
+                border: '1px solid rgba(220,38,38,0.35)',
+                borderRadius: 12,
+                padding: '10px 18px',
+                color: '#fca5a5',
+                fontFamily: 'monospace',
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: unableState === 'loading' ? 'not-allowed' : 'pointer',
+                opacity: unableState === 'loading' ? 0.6 : 1,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                letterSpacing: '0.02em',
+              }}
+            >
+              <span>🚨</span>
+              {unableState === 'loading'
+                ? 'Alerting staff…'
+                : unableState === 'error'
+                  ? 'Alert failed — tap to retry'
+                  : 'Patient cannot respond? Alert staff →'}
+            </button>
+          )}
         </div>
 
         {/* ── Footer note ── */}
