@@ -38,6 +38,7 @@ export default function RealtimeBoothPage() {
   const [errorMsg, setErrorMsg] = useState('');
   const [userTranscript, setUserTranscript] = useState('');
   const [assistantSubtitle, setAssistantSubtitle] = useState('');
+  const [assistantTurnId, setAssistantTurnId] = useState(0);
   const [emergencyTriggered, setEmergencyTriggered] = useState(false);
   const [audioEl, setAudioEl] = useState<HTMLAudioElement | null>(null);
   const [completedSteps, setCompletedSteps] = useState<Set<string>>(new Set());
@@ -52,6 +53,8 @@ export default function RealtimeBoothPage() {
   const clientRef = useRef<RealtimeClient | null>(null);
   const audioContainerRef = useRef<HTMLDivElement>(null);
   const assistantBufRef = useRef('');
+  const speakStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const audioStartedAtRef = useRef<number>(0);
 
   const pushDebug = (label: string, detail?: string) => {
     if (!debugEnabled) return;
@@ -67,37 +70,72 @@ export default function RealtimeBoothPage() {
       pushDebug(`tool:${name}`, `count=${toolCallCountRef.current[name]}`);
     };
 
+    // Retry budget: caps repeated tool calls so a confused model can't loop
+    // forever. Each tool key has its own counter; once exceeded, returns a
+    // permanent failure message that tells the model to give up + advance.
+    const PER_TOOL_LIMIT: Record<string, number> = {
+      submit_answer: 3,        // per step
+      trigger_measurement: 3,  // per device
+      flag_emergency: 1,       // never retry an escalation
+      complete_triage: 2,
+    };
+    const TOTAL_TOOL_LIMIT = 80;
+
+    const overBudget = (key: string, perToolLimit: number): string | null => {
+      const total = Object.values(toolCallCountRef.current).reduce((a, b) => a + b, 0);
+      if (total >= TOTAL_TOOL_LIMIT) {
+        return `tool quota exhausted (${TOTAL_TOOL_LIMIT}). Stop calling tools.`;
+      }
+      const count = toolCallCountRef.current[key] ?? 0;
+      if (count >= perToolLimit) {
+        return `${key} retry budget exhausted (${perToolLimit}). Treat as recorded and advance to the next step. Do NOT call this tool again.`;
+      }
+      return null;
+    };
+
     const tools: ToolDispatcher = {
       submit_answer: async ({ step, value }) => {
-        trackToolCall(`submit_answer:${step}`);
-        const res = await api.submitAnswer(sessionId, step, value, 'realtime');
-        const d = res.data;
-        setCompletedSteps((prev) => {
-          if (prev.has(step)) return prev;
-          const next = new Set(prev);
-          next.add(step);
-          return next;
-        });
-        return {
-          ok: true,
-          next_step: d.next_step,
-          next_question: d.next_question,
-          ctas_level: d.ctas_level,
-          guidance: d.next_question
-            ? `Acknowledge briefly, then ask: "${d.next_question}"`
-            : d.next_step === 'end' || d.next_step === 'results'
-              ? 'All required questions answered. Now call complete_triage.'
-              : 'Continue the conversation naturally.',
-        };
+        const key = `submit_answer:${step}`;
+        const block = overBudget(key, PER_TOOL_LIMIT.submit_answer);
+        if (block) return { ok: false, error: block, guidance: block };
+        trackToolCall(key);
+        try {
+          const res = await api.submitAnswer(sessionId, step, value, 'realtime');
+          const d = res.data;
+          setCompletedSteps((prev) => {
+            if (prev.has(step)) return prev;
+            const next = new Set(prev);
+            next.add(step);
+            return next;
+          });
+          return {
+            ok: true,
+            next_step: d.next_step,
+            next_question: d.next_question,
+            ctas_level: d.ctas_level,
+            guidance: d.next_question
+              ? `Acknowledge briefly, then ask: "${d.next_question}"`
+              : d.next_step === 'end' || d.next_step === 'results'
+                ? 'All required questions answered. Now call complete_triage.'
+                : 'Continue the conversation naturally.',
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'submit_answer failed';
+          return { ok: false, error: msg, guidance: 'Apologize briefly and try a different question.' };
+        }
       },
       trigger_measurement: async ({ device_type }) => {
-        trackToolCall(`trigger_measurement:${device_type}`);
+        const key = `trigger_measurement:${device_type}`;
+        const block = overBudget(key, PER_TOOL_LIMIT.trigger_measurement);
+        if (block) return { ok: false, error: block, guidance: block };
+        trackToolCall(key);
         setCompletedSteps((prev) => {
           if (prev.has('vitals')) return prev;
           const next = new Set(prev);
           next.add('vitals');
           return next;
         });
+        try {
         const res = await api.triggerMeasurement(
           sessionId,
           device_type as 'BLOOD_PRESSURE' | 'TEMPERATURE' | 'OXIMETER',
@@ -118,45 +156,72 @@ export default function RealtimeBoothPage() {
           reading_text: readingText,
           guidance: 'Briefly verbalize this reading to the patient and continue to the next step.',
         };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'measurement failed';
+          return { ok: false, error: msg, guidance: 'Apologize, skip this reading, and continue.' };
+        }
       },
       flag_emergency: async ({ reason }) => {
+        const block = overBudget('flag_emergency', PER_TOOL_LIMIT.flag_emergency);
+        if (block) return { ok: false, error: block, guidance: block };
         trackToolCall('flag_emergency');
-        await api.submitAnswer(sessionId, 'first_look', 'yes', 'realtime');
-        setEmergencyTriggered(true);
-        return {
-          ok: true,
-          escalated: true,
-          reason,
-          guidance: 'Emergency alert sent to staff. Tell the patient calmly that help is coming and to stay still. Do NOT call any further tools.',
-        };
+        try {
+          await api.submitAnswer(sessionId, 'first_look', 'yes', 'realtime');
+          setEmergencyTriggered(true);
+          return {
+            ok: true,
+            escalated: true,
+            reason,
+            guidance: 'Emergency alert sent to staff. Tell the patient calmly that help is coming and to stay still. Do NOT call any further tools.',
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'flag_emergency failed';
+          return { ok: false, error: msg, guidance: 'Tell the patient calmly that help is coming. Do not retry.' };
+        }
       },
       complete_triage: async () => {
+        const block = overBudget('complete_triage', PER_TOOL_LIMIT.complete_triage);
+        if (block) return { ok: false, error: block, guidance: block };
         trackToolCall('complete_triage');
-        setTriageDone(true);
-        const res = await api.completeTriage(sessionId);
-        const ctas = res.data.ctas_level;
-        const specialty = res.data.routing_specialty;
-        const ctasMessage: Record<number, string> = {
-          1: 'You will be seen IMMEDIATELY. A nurse is coming to you now.',
-          2: 'You will be seen within 15 minutes. Please remain seated and alert staff if symptoms worsen.',
-          3: 'You will be seen within 30 minutes. Remain in the waiting area.',
-          4: 'You will be seen within 60 minutes. Stay comfortable and let reception know if you feel worse.',
-          5: 'You will be seen within 2 hours. Reception will call your name.',
-        };
-        setTimeout(() => {
-          if (!cancelled) router.push(`/booth/${sessionId}/results`);
-        }, 4000);
-        return {
-          ok: true,
-          ctas_level: ctas,
-          routing_specialty: specialty,
-          message_for_patient: ctas ? ctasMessage[ctas] : 'A clinician will see you soon.',
-          guidance: 'Briefly tell the patient their wait time and where they will be seen. Then thank them and stop calling tools.',
-        };
+        try {
+          setTriageDone(true);
+          const res = await api.completeTriage(sessionId);
+          const ctas = res.data.ctas_level;
+          const specialty = res.data.routing_specialty;
+          const ctasMessage: Record<number, string> = {
+            1: 'You will be seen IMMEDIATELY. A nurse is coming to you now.',
+            2: 'You will be seen within 15 minutes. Please remain seated and alert staff if symptoms worsen.',
+            3: 'You will be seen within 30 minutes. Remain in the waiting area.',
+            4: 'You will be seen within 60 minutes. Stay comfortable and let reception know if you feel worse.',
+            5: 'You will be seen within 2 hours. Reception will call your name.',
+          };
+          setTimeout(() => {
+            if (!cancelled) router.push(`/booth/${sessionId}/results`);
+          }, 4000);
+          return {
+            ok: true,
+            ctas_level: ctas,
+            routing_specialty: specialty,
+            message_for_patient: ctas ? ctasMessage[ctas] : 'A clinician will see you soon.',
+            guidance: 'Briefly tell the patient their wait time and where they will be seen. Then thank them and stop calling tools.',
+          };
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'complete_triage failed';
+          return { ok: false, error: msg, guidance: 'Apologize and tell the patient a clinician will be with them soon.' };
+        }
       },
     };
 
-    (async () => {
+    let reconnectAttempts = 0;
+    let mintInFlight = false;
+    const MAX_RECONNECTS = 1;
+
+    const connectClient = async () => {
+      // Guard against React StrictMode double-mount + Fast Refresh causing
+      // two simultaneous mints — each one burns an OpenAI Realtime session
+      // and trips the per-IP throttle.
+      if (mintInFlight) return;
+      mintInFlight = true;
       try {
         const mint = await api.createRealtimeSession(sessionId);
         if (cancelled) return;
@@ -166,15 +231,28 @@ export default function RealtimeBoothPage() {
           {
             onConnected: () => {
               if (cancelled) return;
+              reconnectAttempts = 0;            // healthy connection resets budget
               setPhase('listening');
               client.startConversation();
               pushDebug('connected');
             },
             onDisconnected: (reason) => {
               if (cancelled) return;
+              pushDebug('disconnected', reason);
+              // One automatic reconnect on transient WebRTC failure. Mints fresh
+              // ephemeral key (the old one is single-use). Skip on user-triggered
+              // disconnects (destroyed) and after the budget is spent.
+              if (reconnectAttempts < MAX_RECONNECTS) {
+                reconnectAttempts++;
+                pushDebug('reconnect_attempt', String(reconnectAttempts));
+                setPhase('connecting');
+                clientRef.current?.destroy();
+                clientRef.current = null;
+                connectClient();
+                return;
+              }
               setPhase('error');
               setErrorMsg(reason ?? 'Connection lost');
-              pushDebug('disconnected', reason);
             },
             onUserTranscript: (text, isFinal) => {
               if (cancelled || !isFinal) return;
@@ -192,11 +270,17 @@ export default function RealtimeBoothPage() {
               // New model response begins — clear previous subtitle for fresh turn.
               assistantBufRef.current = '';
               setAssistantSubtitle('');
+              setAssistantTurnId((n) => n + 1);
+              audioStartedAtRef.current = 0;
+              if (speakStopTimerRef.current) {
+                clearTimeout(speakStopTimerRef.current);
+                speakStopTimerRef.current = null;
+              }
               pushDebug('response_start');
             },
             onSpeakingStart: () => {
               if (cancelled) return;
-              // Fires per audio chunk; only run latency calc once per turn.
+              // Fires per transcript delta — record true audio start once per turn.
               const t = turnTimingRef.current;
               if (t.speakStartAt) {
                 setPhase('speaking');
@@ -210,6 +294,7 @@ export default function RealtimeBoothPage() {
                 t.userTranscriptAt = null;
               }
               t.speakStartAt = now;
+              audioStartedAtRef.current = now;
               setPhase('speaking');
               pushDebug('speaking_start');
             },
@@ -217,13 +302,48 @@ export default function RealtimeBoothPage() {
               if (cancelled) return;
               // Reset turn-start guard so next response measures latency fresh.
               turnTimingRef.current.speakStartAt = null;
+              if (speakStopTimerRef.current) {
+                clearTimeout(speakStopTimerRef.current);
+                speakStopTimerRef.current = null;
+              }
               setPhase('listening');
               pushDebug('speaking_stop');
             },
-            onListeningStart: () => {
+            onResponseComplete: (hadAudio: boolean) => {
+              if (cancelled || !hadAudio || !audioStartedAtRef.current) return;
+              // RTP audio plays in real time and keeps going for seconds after
+              // response.done fires. Estimate total spoken duration from the
+              // accumulated transcript: ~150 wpm ≈ 400 ms/word, plus a 1.2 s
+              // tail to cover the model's natural ending pauses + jitter buffer.
+              // Subtract however much has already played (now - audioStarted).
+              const text = assistantBufRef.current.trim();
+              const wordCount = text ? text.split(/\s+/).length : 0;
+              const totalAudioMs = wordCount * 400 + 1200;
+              const playedMs = Date.now() - audioStartedAtRef.current;
+              const remaining = Math.max(1200, totalAudioMs - playedMs);
+              if (speakStopTimerRef.current) clearTimeout(speakStopTimerRef.current);
+              speakStopTimerRef.current = setTimeout(() => {
+                speakStopTimerRef.current = null;
+                turnTimingRef.current.speakStartAt = null;
+                audioStartedAtRef.current = 0;
+                setPhase((p) => (p === 'speaking' ? 'listening' : p));
+                pushDebug('speaking_stop_timer');
+              }, remaining);
+              pushDebug('response_complete', `words=${wordCount} hold=${remaining}ms`);
+            },
+            onUserSpeechStart: () => {
               if (cancelled) return;
-              setPhase('thinking');
+              // Mic frequently picks up the kiosk speaker's playback as "user
+              // speech" (echo bleed). Ignore VAD while the model is speaking —
+              // the audio activity detector below owns the speaking→listening
+              // transition. Real barge-in still works server-side.
+              setPhase((p) => (p === 'speaking' ? p : 'listening'));
               pushDebug('user_speech_started');
+            },
+            onUserSpeechStop: () => {
+              if (cancelled) return;
+              setPhase((p) => (p === 'speaking' ? p : 'thinking'));
+              pushDebug('user_speech_stopped');
             },
             onError: (msg) => {
               if (cancelled) return;
@@ -245,19 +365,44 @@ export default function RealtimeBoothPage() {
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : 'Failed to start session';
+        // A failed initial connect also burns a reconnect slot before giving up.
+        if (reconnectAttempts < MAX_RECONNECTS) {
+          reconnectAttempts++;
+          pushDebug('reconnect_attempt', String(reconnectAttempts));
+          setTimeout(() => { if (!cancelled) connectClient(); }, 1000);
+          return;
+        }
         setPhase('error');
         setErrorMsg(msg);
+      } finally {
+        // Clear flag so a genuine disconnect → reconnect path can mint again.
+        // The cancelled check above prevents the second StrictMode invocation
+        // from doing anything useful, but the flag must reset for real
+        // post-connect reconnect attempts.
+        mintInFlight = false;
       }
-    })();
+    };
+
+    connectClient();
 
     return () => {
       cancelled = true;
+      if (speakStopTimerRef.current) {
+        clearTimeout(speakStopTimerRef.current);
+        speakStopTimerRef.current = null;
+      }
       clientRef.current?.destroy();
       clientRef.current = null;
     };
   }, [sessionId, router]);
 
   const isSpeaking = phase === 'speaking';
+  // Map conversation phase to one of the three pre-recorded loops.
+  // "thinking" and "connecting" share the idle loop — feels most natural.
+  const videoState: 'idle' | 'speaking' | 'listening' =
+    phase === 'speaking' ? 'speaking'
+      : phase === 'listening' ? 'listening'
+        : 'idle';
   const phaseLabel = phase === 'speaking'
     ? 'Nurse AI Speaking'
     : phase === 'listening'
@@ -344,7 +489,16 @@ export default function RealtimeBoothPage() {
           </div>
 
           <button
-            onClick={() => router.push(`/booth/${sessionId}/emergency`)}
+            onClick={async () => {
+              // Persist the escalation server-side via the same path the model uses,
+              // then tear down the WebRTC connection so the mic stops before nav.
+              try {
+                await api.submitAnswer(sessionId, 'first_look', 'yes', 'realtime');
+              } catch { /* navigate even if server escalate fails */ }
+              clientRef.current?.destroy();
+              clientRef.current = null;
+              router.push(`/booth/${sessionId}/emergency`);
+            }}
             style={{
               display: 'flex', alignItems: 'center', gap: 6,
               background: 'rgba(220,38,38,0.1)',
@@ -367,39 +521,67 @@ export default function RealtimeBoothPage() {
         {/* ── Main ── */}
         <div className="flex-1 flex flex-col items-center" style={{ padding: '32px 20px 24px', gap: 28 }}>
 
-          {/* Voice orb stage */}
+          {/* Video avatar stage */}
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
 
-            {/* Outer rings */}
+            {/* Outer rings — only visible while model is speaking */}
             <div style={{
-              position: 'absolute', inset: -22, borderRadius: '50%',
-              border: `1.5px solid rgba(9,246,238,${isSpeaking ? '0.4' : '0.1'})`,
+              position: 'absolute', inset: -16, borderRadius: 32,
+              border: `1.5px solid rgba(9,246,238,${isSpeaking ? '0.4' : '0.08'})`,
               animation: isSpeaking ? 'speak-ring 1.6s ease-in-out infinite' : 'none',
               transition: 'border-color 0.4s',
               pointerEvents: 'none',
             }} />
             <div style={{
-              position: 'absolute', inset: -42, borderRadius: '50%',
-              border: `1px solid rgba(9,246,238,${isSpeaking ? '0.2' : '0.05'})`,
+              position: 'absolute', inset: -34, borderRadius: 36,
+              border: `1px solid rgba(9,246,238,${isSpeaking ? '0.2' : '0.04'})`,
               animation: isSpeaking ? 'speak-ring2 1.6s ease-in-out infinite 0.4s' : 'none',
               transition: 'border-color 0.4s',
               pointerEvents: 'none',
             }} />
 
-            {/* Voice orb */}
+            {/* Video card with crossfaded loops */}
             <div style={{
-              width: 280,
-              height: 280,
-              borderRadius: '50%',
+              width: 320,
+              height: 320,
+              borderRadius: 24,
+              overflow: 'hidden',
               border: '2px solid rgba(9,246,238,0.35)',
-              background: 'radial-gradient(circle at 50% 40%, rgba(9,246,238,0.18) 0%, rgba(11,40,39,0.95) 60%, var(--color-dash-card) 100%)',
+              background: 'var(--color-dash-card)',
               position: 'relative',
               animation: 'orb-glow 3s ease-in-out infinite',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              overflow: 'hidden',
             }}>
+              <video
+                src="/avatar/idle.mp4"
+                autoPlay loop muted playsInline
+                style={{
+                  width: '100%', height: '100%', objectFit: 'cover',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'idle' ? 1 : 0,
+                  transition: 'opacity 0.25s ease',
+                }}
+              />
+              <video
+                src="/avatar/speaking.mp4"
+                autoPlay loop muted playsInline
+                style={{
+                  width: '100%', height: '100%', objectFit: 'cover',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'speaking' ? 1 : 0,
+                  transition: 'opacity 0.25s ease',
+                }}
+              />
+              <video
+                src="/avatar/listening.mp4"
+                autoPlay loop muted playsInline
+                style={{
+                  width: '100%', height: '100%', objectFit: 'cover',
+                  position: 'absolute', inset: 0,
+                  opacity: videoState === 'listening' ? 1 : 0,
+                  transition: 'opacity 0.25s ease',
+                }}
+              />
+
               {/* Live badge */}
               <div style={{
                 position: 'absolute', top: 14, right: 14,
@@ -422,14 +604,7 @@ export default function RealtimeBoothPage() {
                 </span>
               </div>
 
-              {/* Center icon — stethoscope */}
-              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#09f6ee" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.85 }}>
-                <path d="M4.8 2.3A.3.3 0 1 0 5 2H4a2 2 0 0 0-2 2v5a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6V4a2 2 0 0 0-2-2h-1a.3.3 0 1 0 .2.3" />
-                <path d="M8 15v1a6 6 0 0 0 6 6v0a6 6 0 0 0 6-6v-4" />
-                <circle cx="20" cy="10" r="2" />
-              </svg>
-
-              {/* Audio-driven waveform overlay */}
+              {/* Audio-driven waveform overlay (bottom strip) */}
               <Waveform audioEl={audioEl} active={isSpeaking} />
             </div>
 
@@ -468,7 +643,7 @@ export default function RealtimeBoothPage() {
             {/* Assistant subtitle bubble */}
             {assistantSubtitle && (
               <div
-                key={assistantSubtitle.length}
+                key={assistantTurnId}
                 className="fade-up"
                 style={{
                   background: 'var(--color-dash-card)',

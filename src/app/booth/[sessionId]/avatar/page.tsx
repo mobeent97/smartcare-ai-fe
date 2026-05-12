@@ -217,7 +217,6 @@ export default function AvatarConversationPage() {
   const dgTokenRef = useRef<string | null>(null);
   const dgTokenExpiresAtRef = useRef<number>(0);
   const waveformRef = useRef<HTMLDivElement>(null);
-  const pendingSpeechRef = useRef<string | null>(null);
   const pendingLLMSpeechRef = useRef<string | null>(null);
 
   // Vitals measurement state
@@ -376,9 +375,6 @@ export default function AvatarConversationPage() {
 
   async function handleVitalsDone() {
     setPhase('processing');
-    const speech = pendingSpeechRef.current;
-    pendingSpeechRef.current = null;
-    if (speech) await getAvatarManager()?.speak(speech);
     router.push(`/booth/${sessionId}/results`);
   }
 
@@ -390,7 +386,8 @@ export default function AvatarConversationPage() {
     try {
       const res = await api.submitAnswer(sessionId, step.stepName, answer.trim());
       const { next_step, avatar_speech_text } = res.data;
-      if (step.stepName === 'first_look' && answer === 'yes') {
+      // Trust the backend's routing decision (it owns the state machine + red-flag engine).
+      if (next_step === 'emergency') {
         router.push(`/booth/${sessionId}/emergency`);
         return;
       }
@@ -399,13 +396,10 @@ export default function AvatarConversationPage() {
         router.push(`/booth/${sessionId}/results`);
         return;
       }
-      // Store LLM-generated speech for next step's useEffect
-      if (avatar_speech_text && STEPS[stepIndex + 1]?.inputType !== 'vitals') {
+      // Always lead the next step with the LLM-generated speech (the ack + lead-in
+      // belongs at the START of the next step, not after a vitals measurement).
+      if (avatar_speech_text) {
         pendingLLMSpeechRef.current = avatar_speech_text;
-      }
-      // Store results speech to play after vitals step if the next step is vitals
-      if (STEPS[stepIndex + 1]?.inputType === 'vitals') {
-        pendingSpeechRef.current = avatar_speech_text || null;
       }
       // Thinking state before advancing to next question
       setPhase('thinking');

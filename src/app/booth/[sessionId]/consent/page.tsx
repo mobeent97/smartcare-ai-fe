@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { prefetchTts, prewarmAudio } from '@/lib/video-avatar';
 import { api } from '@/lib/api';
+import { useBoothStore } from '@/store/booth';
 
 // All audio prefetched in parallel while user reads consent
 const AVATAR_INTRO =
@@ -35,6 +36,13 @@ const CONSENT_POINTS = [
 export default function ConsentPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const resumed = searchParams.get('resumed') === '1';
+  const queryMode = searchParams.get('mode'); // 'avatar' | 'manual' | null
+  const storeMode = useBoothStore((s) => s.mode);
+  // URL beats store (in case patient hits link directly), store is the fallback
+  // when the guard layout redirects here without a mode param.
+  const mode = queryMode || storeMode || 'avatar';
   const [audioReady, setAudioReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
 
@@ -48,10 +56,21 @@ export default function ConsentPage() {
     prefetchTts(ALL_TTS_TEXTS).then(() => setAudioReady(true));
   }, []);
 
-  function handleAgree() {
+  async function handleAgree() {
     setAgreed(true);
     prewarmAudio();
-    api.recordConsent(sessionId).catch(() => {}); // fire-and-forget, don't block navigation
+    // Await consent recording — the layout guard reads consent_given_at on the
+    // next page; if we navigate before the backend persists it, the guard will
+    // bounce the patient straight back here in a redirect loop.
+    try {
+      await api.recordConsent(sessionId);
+    } catch {
+      // Non-blocking: still navigate. Guard will retry or accept stale check.
+    }
+    if (mode === 'manual') {
+      router.push(`/booth/${sessionId}/manual`);
+      return;
+    }
     const useRealtime = process.env.NEXT_PUBLIC_USE_REALTIME === 'true';
     router.push(`/booth/${sessionId}/${useRealtime ? 'realtime' : 'avatar'}`);
   }
@@ -83,6 +102,26 @@ export default function ConsentPage() {
         justifyContent: 'center',
         padding: '32px 20px',
       }}>
+
+        {resumed && (
+          <div className="fade-up" style={{
+            width: '100%',
+            maxWidth: 560,
+            marginBottom: 14,
+            padding: '12px 16px',
+            background: 'rgba(234,179,8,0.08)',
+            border: '1px solid rgba(234,179,8,0.4)',
+            borderRadius: 14,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+          }}>
+            <span style={{ fontSize: 18 }}>⏱</span>
+            <p style={{ color: '#fde68a', fontSize: 13, lineHeight: 1.5, margin: 0 }}>
+              Your previous session timed out. Please reconfirm consent to continue.
+            </p>
+          </div>
+        )}
 
         {/* Card */}
         <div className="fade-up" style={{
