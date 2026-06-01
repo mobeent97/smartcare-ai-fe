@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { TriageSession } from '@/types/api';
+import type { TriageSession, DeteriorationAlert } from '@/types/api';
 
 interface EmergencyAlert {
   sessionId: string;
@@ -11,6 +11,7 @@ interface DashboardState {
   queue: TriageSession[];
   selectedCase: TriageSession | null;
   emergencyAlert: EmergencyAlert | null;
+  deteriorationAlert: DeteriorationAlert | null;
   setQueue: (queue: TriageSession[]) => void;
   updateQueueItem: (sessionId: string, data: Partial<TriageSession>) => void;
   addOrUpdateQueueItem: (session: TriageSession) => void;
@@ -18,12 +19,15 @@ interface DashboardState {
   setSelectedCase: (session: TriageSession | null) => void;
   setEmergencyAlert: (alert: EmergencyAlert) => void;
   clearEmergencyAlert: () => void;
+  setDeteriorationAlert: (alert: DeteriorationAlert) => void;
+  clearDeteriorationAlert: () => void;
 }
 
 export const useDashboardStore = create<DashboardState>((set) => ({
   queue: [],
   selectedCase: null,
   emergencyAlert: null,
+  deteriorationAlert: null,
   setQueue: (queue) => set({ queue }),
   updateQueueItem: (sessionId, data) =>
     set((state) => ({
@@ -47,4 +51,6 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   setSelectedCase: (session) => set({ selectedCase: session }),
   setEmergencyAlert: (alert) => set({ emergencyAlert: alert }),
   clearEmergencyAlert: () => set({ emergencyAlert: null }),
+  setDeteriorationAlert: (alert) => set({ deteriorationAlert: alert }),
+  clearDeteriorationAlert: () => set({ deteriorationAlert: null }),
 }));

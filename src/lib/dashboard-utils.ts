@@ -1,9 +1,17 @@
 import type { TriageSession } from '@/types/api';
 
-/* ─── Patient display ID ──────────────────────────────────── */
+/* ─── Patient display ID / name ───────────────────────────── */
 export function patientDisplayId(session: TriageSession): string {
+  if (session.patient_name) return session.patient_name;
   const year = new Date(session.created_at).getFullYear();
   return `P-${year}-${session.id.slice(-4).toUpperCase()}`;
+}
+
+export function patientDemographicsLabel(session: TriageSession): string {
+  const parts: string[] = [];
+  if (session.patient_age) parts.push(`${session.patient_age}y`);
+  if (session.patient_sex) parts.push(session.patient_sex.charAt(0).toUpperCase() + session.patient_sex.slice(1));
+  return parts.join(' · ');
 }
 
 /* ─── Priority score (0–99) ───────────────────────────────── */

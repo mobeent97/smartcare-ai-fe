@@ -1,6 +1,6 @@
 'use client';
 
-import type { TriageSession } from '@/types/api';
+import type { TriageSession, DeteriorationAlert } from '@/types/api';
 
 // Auto-upgrade ws:// → wss:// when the page is served over HTTPS.
 // Set NEXT_PUBLIC_WS_URL in your deployment env to point at your backend host.
@@ -23,15 +23,18 @@ export class DashboardWebSocket {
   private reconnectCount = 0;
   private onQueueUpdate: (sessionId: string, data: Partial<TriageSession>) => void;
   private onEmergencyAlert: (alert: { sessionId: string; reason: string; redFlags: string[] }) => void;
+  private onDeteriorationAlert: (alert: DeteriorationAlert) => void;
 
   constructor(
     token: string,
     onQueueUpdate: (sessionId: string, data: Partial<TriageSession>) => void,
-    onEmergencyAlert: (alert: { sessionId: string; reason: string; redFlags: string[] }) => void
+    onEmergencyAlert: (alert: { sessionId: string; reason: string; redFlags: string[] }) => void,
+    onDeteriorationAlert: (alert: DeteriorationAlert) => void = () => {}
   ) {
     this.token = token;
     this.onQueueUpdate = onQueueUpdate;
     this.onEmergencyAlert = onEmergencyAlert;
+    this.onDeteriorationAlert = onDeteriorationAlert;
   }
 
   connect(): void {
@@ -51,6 +54,15 @@ export class DashboardWebSocket {
             sessionId: msg.data.session_id,
             reason: msg.data.reason,
             redFlags: msg.data.red_flags ?? [],
+          });
+        } else if (msg.type === 'deterioration_alert') {
+          this.onDeteriorationAlert({
+            sessionId: msg.data.session_id,
+            patientName: msg.data.patient_name ?? null,
+            oldCtas: msg.data.old_ctas,
+            newCtas: msg.data.new_ctas,
+            waitMinutes: msg.data.wait_minutes,
+            reason: msg.data.reason,
           });
         }
       } catch {

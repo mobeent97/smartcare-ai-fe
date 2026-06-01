@@ -1,8 +1,10 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
-import { prefetchTts } from '@/lib/video-avatar';
+import { useParams, useRouter, useSearchParams } from 'next/navigation';
+import { prefetchTts, prewarmAudio } from '@/lib/video-avatar';
+import { api } from '@/lib/api';
+import { useBoothStore } from '@/store/booth';
 
 // All audio prefetched in parallel while user reads consent
 const AVATAR_INTRO =
@@ -16,8 +18,11 @@ const ALL_TTS_TEXTS = [
   AVATAR_INTRO,
   'Before we begin — are you experiencing a life-threatening emergency right now? Chest pain, difficulty breathing, severe bleeding, or loss of consciousness?',
   "What is your main reason for visiting today? Please describe what you're experiencing.",
-  'How old are you, and what is your biological sex? For example: "I am 45 years old, male."',
+  'What is your first name, age, and sex? For example: "My name is Sarah, I am 32 years old, female."',
   'On a scale of 1 to 10, how severe would you say your symptoms are right now? And how long have you had them?',
+  'Are you experiencing any other symptoms — such as fever, difficulty breathing, chest tightness, dizziness, or nausea?',
+  'Do you have any known medical conditions like diabetes, heart disease, or high blood pressure? Are you on any blood thinners or regular medications?',
+  'Excellent! Finally, I\'d like to take a few quick measurements — blood pressure, temperature, and oxygen level. These help me give you the most accurate assessment. Please tap Ready when you\'re comfortable.',
 ];
 
 const CONSENT_POINTS = [
@@ -31,17 +36,43 @@ const CONSENT_POINTS = [
 export default function ConsentPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const resumed = searchParams.get('resumed') === '1';
+  const queryMode = searchParams.get('mode'); // 'avatar' | 'manual' | null
+  const storeMode = useBoothStore((s) => s.mode);
+  // URL beats store (in case patient hits link directly), store is the fallback
+  // when the guard layout redirects here without a mode param.
+  const mode = queryMode || storeMode || 'avatar';
   const [audioReady, setAudioReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
 
-  // Fire prefetch immediately on mount — runs while user reads consent
+  // Fire prefetch immediately on mount — runs while user reads consent.
+  // Realtime flow uses OpenAI Realtime API for voice; skip AKOOL TTS prefetch.
   useEffect(() => {
+    if (process.env.NEXT_PUBLIC_USE_REALTIME === 'true') {
+      setAudioReady(true);
+      return;
+    }
     prefetchTts(ALL_TTS_TEXTS).then(() => setAudioReady(true));
   }, []);
 
-  function handleAgree() {
+  async function handleAgree() {
     setAgreed(true);
-    router.push(`/booth/${sessionId}/avatar`);
+    prewarmAudio();
+    // Await consent recording — the layout guard reads consent_given_at on the
+    // next page; if we navigate before the backend persists it, the guard will
+    // bounce the patient straight back here in a redirect loop.
+    try {
+      await api.recordConsent(sessionId);
+    } catch {
+      // Non-blocking: still navigate. Guard will retry or accept stale check.
+    }
+    if (mode === 'manual') {
+      router.push(`/booth/${sessionId}/manual`);
+      return;
+    }
+    const useRealtime = process.env.NEXT_PUBLIC_USE_REALTIME === 'true';
+    router.push(`/booth/${sessionId}/${useRealtime ? 'realtime' : 'avatar'}`);
   }
 
   return (
@@ -71,6 +102,26 @@ export default function ConsentPage() {
         justifyContent: 'center',
         padding: '32px 20px',
       }}>
+
+        {resumed && (
+          <div className="fade-up" style={{
+            width: '100%',
+            maxWidth: 560,
+            marginBottom: 14,
+            padding: '12px 16px',
+            background: 'rgba(234,179,8,0.08)',
+            border: '1px solid rgba(234,179,8,0.4)',
+            borderRadius: 14,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+          }}>
+            <span style={{ fontSize: 18 }}>⏱</span>
+            <p style={{ color: '#fde68a', fontSize: 13, lineHeight: 1.5, margin: 0 }}>
+              Your previous session timed out. Please reconfirm consent to continue.
+            </p>
+          </div>
+        )}
 
         {/* Card */}
         <div className="fade-up" style={{

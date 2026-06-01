@@ -59,7 +59,7 @@ const ArrowLeftIcon = () => (
 /* ─── Page ───────────────────────────────────────────────────── */
 export default function LoginPage() {
   const router = useRouter();
-  const { setTokens, setUserEmail } = useAuthStore();
+  const { setTokens, setUserEmail, setUserRole, setUserFullName } = useAuthStore();
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -84,7 +84,9 @@ export default function LoginPage() {
     try {
       const res = await api.login(email, password);
       setTokens(res.data.access, res.data.refresh);
-      setUserEmail(email);
+      setUserEmail(res.data.email || email);
+      setUserRole(res.data.role || 'staff');
+      setUserFullName(res.data.full_name || '');
 
       if (rememberMe) {
         localStorage.setItem(REMEMBER_KEY, email);
