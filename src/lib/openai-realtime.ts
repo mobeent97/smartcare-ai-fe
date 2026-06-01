@@ -48,7 +48,9 @@ export interface ToolDispatcher {
   complete_triage: (args: Record<string, never>) => Promise<unknown>;
 }
 
-const REALTIME_URL = 'https://api.openai.com/v1/realtime';
+// GA SDP exchange endpoint. The beta `/v1/realtime?model=...` route was
+// replaced by `/v1/realtime/calls` (model is baked into the ephemeral key).
+const REALTIME_URL = 'https://api.openai.com/v1/realtime/calls';
 
 export class RealtimeClient {
   private pc: RTCPeerConnection | null = null;
@@ -122,13 +124,12 @@ export class RealtimeClient {
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
 
-    const resp = await fetch(`${REALTIME_URL}?model=${encodeURIComponent(this.mint.model)}`, {
+    const resp = await fetch(REALTIME_URL, {
       method: 'POST',
       body: offer.sdp,
       headers: {
         Authorization: `Bearer ${this.mint.client_secret}`,
         'Content-Type': 'application/sdp',
-        'OpenAI-Beta': 'realtime=v1',
       },
     });
     if (!resp.ok) {
