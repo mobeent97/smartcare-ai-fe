@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { prefetchTts, prewarmAudio } from '@/lib/video-avatar';
+import { getConfiguredProvider } from '@/lib/avatar-manager';
 import { api } from '@/lib/api';
 import { useBoothStore } from '@/store/booth';
 
@@ -49,7 +50,9 @@ export default function ConsentPage() {
   // Fire prefetch immediately on mount — runs while user reads consent.
   // Realtime flow uses OpenAI Realtime API for voice; skip AKOOL TTS prefetch.
   useEffect(() => {
-    if (process.env.NEXT_PUBLIC_USE_REALTIME === 'true') {
+    // OpenAI-TTS prefetch only helps the 'video' provider. Realtime, AKOOL and
+    // HeyGen all use their own built-in TTS, so prefetching here is wasted.
+    if (process.env.NEXT_PUBLIC_USE_REALTIME === 'true' || getConfiguredProvider() !== 'video') {
       setAudioReady(true);
       return;
     }

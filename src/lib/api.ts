@@ -168,6 +168,13 @@ class ApiClient {
     return `${BASE_URL}/triage/sessions/${sessionId}/export/pdf/`;
   }
 
+  /** Absolute URL for the avatar-session close endpoint — used with
+   *  navigator.sendBeacon on page unload so a live (AKOOL) streaming session
+   *  is torn down even if the patient closes the tab. */
+  getAvatarCloseUrl(): string {
+    return `${BASE_URL}/triage/avatar/session/close/`;
+  }
+
   async markUnableToAssess(sessionId: string, reason: string) {
     const res = await this.client.post<ApiResponse<{
       id: string; ctas_level: number; status: string; message: string;

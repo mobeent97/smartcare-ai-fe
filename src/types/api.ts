@@ -65,12 +65,21 @@ export interface AuditEvent {
 }
 
 export interface AvatarSessionResponse {
+  // 'video' returns only provider+session_id; 'akool' returns agora_* creds;
+  // 'heygen' returns token+avatar_id+voice_id+quality.
+  provider?: 'video' | 'akool' | 'heygen';
   session_id: string;
+  // akool (live streaming over Agora)
   agora_app_id?: string;
-  agora_channel: string;
+  agora_channel?: string;
   agora_token?: string;
-  agora_uid: number;
-  mode: 'live' | 'mock';
+  agora_uid?: number;
+  mode?: 'live' | 'mock';
+  // heygen (LiveKit streaming token)
+  token?: string;
+  avatar_id?: string;
+  voice_id?: string;
+  quality?: string;
 }
 
 export interface SubmitAnswerResponse {

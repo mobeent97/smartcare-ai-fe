@@ -3,7 +3,19 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
-import { VideoAvatarManager, getAvatarManager, type VideoState } from '@/lib/video-avatar';
+import {
+  createAvatarManager,
+  getActiveAvatarManager,
+  getConfiguredProvider,
+  type AvatarVisualState,
+} from '@/lib/avatar-manager';
+
+// Provider chosen per deploy (kept in sync with backend AVATAR_PROVIDER).
+// 'video' = mp4 loop (zero streaming cost, default); 'akool'/'heygen' = live.
+const AVATAR_PROVIDER = getConfiguredProvider();
+const IS_LIVE_AVATAR = AVATAR_PROVIDER !== 'video';
+// Tear down a live (billed) stream after this much idle time; reopens on next speak.
+const LIVE_IDLE_CLOSE_MS = 25_000;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -205,7 +217,7 @@ export default function AvatarConversationPage() {
 
   const [stepIndex, setStepIndex] = useState(0);
   const [phase, setPhase] = useState<Phase>('avatar_speaking');
-  const [videoState, setVideoState] = useState<VideoState>('idle');
+  const [videoState, setVideoState] = useState<AvatarVisualState>('idle');
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const [error, setError] = useState('');
@@ -218,6 +230,10 @@ export default function AvatarConversationPage() {
   const dgTokenExpiresAtRef = useRef<number>(0);
   const waveformRef = useRef<HTMLDivElement>(null);
   const pendingLLMSpeechRef = useRef<string | null>(null);
+  // Live providers render their remote stream into this single <video>.
+  const liveVideoRef = useRef<HTMLVideoElement>(null);
+  // Idle watchdog: tears down the billed stream after inactivity (cost guard).
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Vitals measurement state
   const [vitalsReady, setVitalsReady] = useState(false);
@@ -234,29 +250,38 @@ export default function AvatarConversationPage() {
     if (!sessionId) return;
     let cancelled = false;
 
-    const mgr = new VideoAvatarManager({
-      onStateChange: (s) => { if (!cancelled) setVideoState(s); },
-      onWaveform: (data) => {
-        const div = waveformRef.current;
-        if (!div) return;
-        const bars = div.querySelectorAll<HTMLElement>('[data-wv]');
-        const step = Math.floor(data.length / bars.length);
-        bars.forEach((bar, i) => {
-          const db = data[i * step] ?? -100;
-          const norm = Math.max(0, Math.min(1, (db + 70) / 70));
-          bar.style.height = `${4 + norm * 24}px`;
-          bar.style.animationName = 'none';
-        });
-      },
-      onSubtitle: (text) => { if (!cancelled) setSubtitle(text); },
-    });
-
     (async () => {
+      // Build the provider-appropriate manager. For live providers the stream
+      // is NOT opened here — it opens lazily on the first speak() below, so
+      // nothing bills while the consent/intro UI is loading.
+      const mgr = await createAvatarManager(AVATAR_PROVIDER, {
+        sessionId,
+        avatarType: 'nurse',
+        getVideoElement: () => liveVideoRef.current,
+        onStateChange: (s) => { if (!cancelled) setVideoState(s); },
+        onWaveform: (data) => {
+          const div = waveformRef.current;
+          if (!div) return;
+          const bars = div.querySelectorAll<HTMLElement>('[data-wv]');
+          const stride = Math.floor(data.length / bars.length);
+          bars.forEach((bar, i) => {
+            const db = data[i * stride] ?? -100;
+            const norm = Math.max(0, Math.min(1, (db + 70) / 70));
+            bar.style.height = `${4 + norm * 24}px`;
+            bar.style.animationName = 'none';
+          });
+        },
+        onSubtitle: (text) => { if (!cancelled) setSubtitle(text); },
+        onError: () => { if (!cancelled) setError('Avatar connection issue — you can use keyboard input below.'); },
+      });
+      if (cancelled) { await mgr.destroy(); return; }
+
       // Prefetch Deepgram token while intro plays. Refresh 30s before expiry.
       api.getDeepgramToken(sessionId).then((r) => {
         dgTokenRef.current = r.key;
         dgTokenExpiresAtRef.current = Date.now() + (r.ttl - 30) * 1000;
       }).catch(() => {});
+
       await mgr.speak(INTRO_SCRIPT);
       if (cancelled) return;
       await mgr.speak(STEPS[0].question);
@@ -264,9 +289,62 @@ export default function AvatarConversationPage() {
       setPhase(STEPS[0].inputType === 'tap' ? 'tap_choice' : 'listening');
     })().catch(() => {});
 
-    return () => { cancelled = true; mgr.destroy(); closeDeepgramSession(deepgramRef.current); };
+    return () => {
+      cancelled = true;
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      getActiveAvatarManager()?.destroy().catch(() => {});
+      closeDeepgramSession(deepgramRef.current);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
+
+  // ── Idle watchdog (live providers only) — stop billing while the patient
+  //    isn't being spoken to. Reopens transparently on the next speak(). ──
+  function armIdleClose() {
+    if (!IS_LIVE_AVATAR) return;
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = setTimeout(() => {
+      getActiveAvatarManager()?.closeStream().catch(() => {});
+    }, LIVE_IDLE_CLOSE_MS);
+  }
+  function cancelIdleClose() {
+    if (idleTimerRef.current) { clearTimeout(idleTimerRef.current); idleTimerRef.current = null; }
+  }
+
+  // ── Beacon close on exit — tears down a live (AKOOL) session if the patient
+  //    closes the tab mid-flow, so idle minutes don't bleed. ──
+  useEffect(() => {
+    if (!IS_LIVE_AVATAR) return;
+    const onHide = () => {
+      if (document.visibilityState !== 'hidden') return;
+      const payload = getActiveAvatarManager()?.beaconClosePayload();
+      if (!payload) return;
+      try {
+        navigator.sendBeacon(
+          api.getAvatarCloseUrl(),
+          new Blob([JSON.stringify(payload)], { type: 'application/json' }),
+        );
+      } catch { /* best-effort */ }
+    };
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', onHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('pagehide', onHide);
+    };
+  }, []);
+
+  // ── Idle watchdog driver: arm while waiting on the patient, cancel while the
+  //    avatar is busy. Closes the billed stream after LIVE_IDLE_CLOSE_MS idle. ──
+  useEffect(() => {
+    if (!IS_LIVE_AVATAR) return;
+    if (phase === 'avatar_speaking' || phase === 'processing' || phase === 'thinking') {
+      cancelIdleClose();
+    } else {
+      armIdleClose();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase]);
 
   // ── Step 1+ question ──
   useEffect(() => {
@@ -282,7 +360,7 @@ export default function AvatarConversationPage() {
     pendingLLMSpeechRef.current = null;
 
     (async () => {
-      const mgr = getAvatarManager();
+      const mgr = getActiveAvatarManager();
       if (!mgr) return;
       await mgr.speak(speechText);
       if (cancelled) return;
@@ -298,7 +376,7 @@ export default function AvatarConversationPage() {
     setInterimTranscript('');
     setError('');
     setPhase('listening');
-    getAvatarManager()?.showListening();
+    getActiveAvatarManager()?.showListening();
 
     try {
       // Refetch if no token or near expiry
@@ -309,20 +387,20 @@ export default function AvatarConversationPage() {
       }
       const session = await openDeepgramSession(
         dgTokenRef.current,
-        (interim) => setInterimTranscript(interim),
+        (interim) => { cancelIdleClose(); setInterimTranscript(interim); },
         (final) => setTranscript((prev) => (prev + ' ' + final).trim()),
         () => {
           // Auto-stop on speech_final
           closeDeepgramSession(deepgramRef.current);
           deepgramRef.current = null;
-          getAvatarManager()?.showIdle();
+          getActiveAvatarManager()?.showIdle();
           setInterimTranscript('');
           setPhase('confirming');
         },
         (msg) => {
           closeDeepgramSession(deepgramRef.current);
           deepgramRef.current = null;
-          getAvatarManager()?.showIdle();
+          getActiveAvatarManager()?.showIdle();
           setError(msg);
           setShowFallback(true);
           setPhase('confirming');
@@ -338,7 +416,7 @@ export default function AvatarConversationPage() {
         setError('Could not connect to voice service. Please use keyboard input below.');
         setShowFallback(true);
       }
-      getAvatarManager()?.showIdle();
+      getActiveAvatarManager()?.showIdle();
       setPhase('confirming');
     }
   }
@@ -346,7 +424,7 @@ export default function AvatarConversationPage() {
   function stopListening() {
     closeDeepgramSession(deepgramRef.current);
     deepgramRef.current = null;
-    getAvatarManager()?.showIdle();
+    getActiveAvatarManager()?.showIdle();
     setInterimTranscript('');
     setPhase('confirming');
   }
@@ -354,6 +432,9 @@ export default function AvatarConversationPage() {
   // ── Vitals measurement sequence ──
   async function handleVitalsMeasure() {
     setVitalsReady(true);
+    // Measurements run ~30-90s with the avatar silent — close the billed
+    // stream so idle minutes don't accrue. It reopens on the next speak().
+    if (IS_LIVE_AVATAR) await getActiveAvatarManager()?.closeStream().catch(() => {});
     try {
       setVitalsMeasuring('bp');
       const bp = await api.triggerMeasurement(sessionId, 'BLOOD_PRESSURE');
@@ -392,7 +473,7 @@ export default function AvatarConversationPage() {
         return;
       }
       if (next_step === 'results' || stepIndex >= STEPS.length - 1) {
-        if (avatar_speech_text) await getAvatarManager()?.speak(avatar_speech_text);
+        if (avatar_speech_text) await getActiveAvatarManager()?.speak(avatar_speech_text);
         router.push(`/booth/${sessionId}/results`);
         return;
       }
@@ -528,7 +609,7 @@ export default function AvatarConversationPage() {
             <div
               onClick={() => {
                 if (phase === 'avatar_speaking') {
-                  getAvatarManager()?.interrupt();
+                  getActiveAvatarManager()?.interrupt();
                   setSubtitle('');
                   setPhase('listening');
                 }
@@ -546,37 +627,51 @@ export default function AvatarConversationPage() {
                 cursor: phase === 'avatar_speaking' ? 'pointer' : 'default',
               }}>
 
-              {/* Crossfade videos using opacity */}
-              <video
-                src="/avatar/idle.mp4"
-                autoPlay loop muted playsInline
-                style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
-                  position: 'absolute', inset: 0,
-                  opacity: videoState === 'idle' ? 1 : 0,
-                  transition: 'opacity 0.15s ease',
-                }}
-              />
-              <video
-                src="/avatar/speaking.mp4"
-                autoPlay loop muted playsInline
-                style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
-                  position: 'absolute', inset: 0,
-                  opacity: videoState === 'speaking' ? 1 : 0,
-                  transition: 'opacity 0.15s ease',
-                }}
-              />
-              <video
-                src="/avatar/listening.mp4"
-                autoPlay loop muted playsInline
-                style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
-                  position: 'absolute', inset: 0,
-                  opacity: videoState === 'listening' ? 1 : 0,
-                  transition: 'opacity 0.15s ease',
-                }}
-              />
+              {IS_LIVE_AVATAR ? (
+                /* Live provider (AKOOL/HeyGen): single remote stream element */
+                <video
+                  ref={liveVideoRef}
+                  autoPlay playsInline
+                  style={{
+                    width: '100%', height: '100%', objectFit: 'cover',
+                    position: 'absolute', inset: 0,
+                  }}
+                />
+              ) : (
+                /* Video-loop provider: crossfade pre-recorded mp4s by state */
+                <>
+                  <video
+                    src="/avatar/idle.mp4"
+                    autoPlay loop muted playsInline
+                    style={{
+                      width: '100%', height: '100%', objectFit: 'cover',
+                      position: 'absolute', inset: 0,
+                      opacity: videoState === 'idle' ? 1 : 0,
+                      transition: 'opacity 0.15s ease',
+                    }}
+                  />
+                  <video
+                    src="/avatar/speaking.mp4"
+                    autoPlay loop muted playsInline
+                    style={{
+                      width: '100%', height: '100%', objectFit: 'cover',
+                      position: 'absolute', inset: 0,
+                      opacity: videoState === 'speaking' ? 1 : 0,
+                      transition: 'opacity 0.15s ease',
+                    }}
+                  />
+                  <video
+                    src="/avatar/listening.mp4"
+                    autoPlay loop muted playsInline
+                    style={{
+                      width: '100%', height: '100%', objectFit: 'cover',
+                      position: 'absolute', inset: 0,
+                      opacity: videoState === 'listening' ? 1 : 0,
+                      transition: 'opacity 0.15s ease',
+                    }}
+                  />
+                </>
+              )}
 
               {/* Live badge */}
               <div style={{
