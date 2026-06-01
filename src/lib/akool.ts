@@ -60,12 +60,12 @@ export class AKOOLAvatarManager {
         this._startStatusPoller();
         await this._connectAgora(
           data.agora_app_id ?? process.env.NEXT_PUBLIC_AGORA_APP_ID ?? '',
-          data.agora_channel,
+          data.agora_channel ?? '',
           data.agora_token ?? '',
           data.agora_uid ?? 12345
         );
       }
-      return { akoolSessionId: this.akoolSessionId!, mode: data.mode };
+      return { akoolSessionId: this.akoolSessionId!, mode: data.mode ?? 'live' };
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       if (!this._destroyed) {
