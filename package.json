@@ -9,10 +9,11 @@
     "start": "next start"
   },
   "dependencies": {
-    "@heygen/streaming-avatar": "2.1.0",
+    "@heygen/streaming-avatar": "^2.0.16",
     "agora-rtc-sdk-ng": "^4.24.3",
+    "akool-streaming-avatar-sdk": "^2.0.0",
     "axios": "^1.15.0",
-    "next": "15.5.15",
+    "next": "^15.5.19",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "zustand": "^5.0.12"
