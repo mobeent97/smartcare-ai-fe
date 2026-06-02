@@ -119,6 +119,11 @@ class AkoolAvatar implements AvatarManager {
     if (this._destroyed || !text.trim()) return;
     await this.ensureOpen();
     if (this._destroyed || !this._mgr) return;
+    // Wait for the avatar video to actually publish before showing subtitles /
+    // the speaking state — the stream comes up late and the text is queued
+    // until then, so starting subtitles at call time runs them ahead of speech.
+    await this._mgr.awaitReady();
+    if (this._destroyed || !this._mgr) return;
     this._opts.onStateChange?.('speaking');
     this._startSubtitles(text);
     await this._mgr.speak(text);

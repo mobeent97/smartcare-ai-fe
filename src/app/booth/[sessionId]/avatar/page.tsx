@@ -16,6 +16,9 @@ const AVATAR_PROVIDER = getConfiguredProvider();
 const IS_LIVE_AVATAR = AVATAR_PROVIDER !== 'video';
 // Tear down a live (billed) stream after this much idle time; reopens on next speak.
 const LIVE_IDLE_CLOSE_MS = 25_000;
+// Wait after the avatar finishes before auto-opening the mic, so the audio tail
+// doesn't bleed into the mic (the avatar hearing itself).
+const POST_SPEECH_ECHO_GUARD_MS = 700;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -235,9 +238,13 @@ export default function AvatarConversationPage() {
       if (cancelled) return;
       await mgr.speak(STEPS[0].question);
       if (cancelled) return;
-      // Conversational: auto-open the mic when the avatar finishes — no tap.
-      if (STEPS[0].inputType === 'tap') setPhase('tap_choice');
-      else startListening();
+      // Conversational: auto-open the mic ONLY for voice steps (not vitals/tap).
+      if (STEPS[0].inputType === 'voice') {
+        await new Promise((r) => setTimeout(r, POST_SPEECH_ECHO_GUARD_MS));
+        if (!cancelled) startListening();
+      } else {
+        setPhase('tap_choice');
+      }
     })().catch(() => {});
 
     return () => {
@@ -317,9 +324,13 @@ export default function AvatarConversationPage() {
       if (!mgr) return;
       await mgr.speak(speechText);
       if (cancelled) return;
-      // Conversational: auto-open the mic when the avatar finishes — no tap.
-      if (STEPS[stepIndex].inputType === 'tap') setPhase('tap_choice');
-      else startListening();
+      // Conversational: auto-open the mic ONLY for voice steps (not vitals/tap).
+      if (STEPS[stepIndex].inputType === 'voice') {
+        await new Promise((r) => setTimeout(r, POST_SPEECH_ECHO_GUARD_MS));
+        if (!cancelled) startListening();
+      } else {
+        setPhase('tap_choice');
+      }
     })().catch(() => {});
 
     return () => { cancelled = true; };

@@ -34,6 +34,7 @@ export class AKOOLAvatarManager {
   private akoolSessionId: string | null = null;
   private isMockMode = false;
   private ready = false;
+  private readyResolvers: Array<() => void> = [];
   private queue: string[] = [];
   private options: AvatarManagerOptions;
   private _destroyed = false;
@@ -86,6 +87,8 @@ export class AKOOLAvatarManager {
               this.ready = true;
               console.log('[AKOOL] video published — stream ready, flushing queued speech');
               this.options.onConnectionChange?.('connected');
+              this.readyResolvers.forEach((r) => r());
+              this.readyResolvers = [];
               this._flush();
             } else {
               (track as IRemoteAudioTrack)?.play();
@@ -117,6 +120,17 @@ export class AKOOLAvatarManager {
       }
       throw err;
     }
+  }
+
+  /** Resolves once the avatar video has published (stream actually live), so
+   *  callers can align subtitles/UI with real speech instead of the moment the
+   *  text was queued. Resolves immediately in mock mode; times out as a guard. */
+  awaitReady(timeoutMs = 15000): Promise<void> {
+    if (this.ready || this.isMockMode || this._destroyed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, timeoutMs);
+      this.readyResolvers.push(() => { clearTimeout(t); resolve(); });
+    });
   }
 
   /** Send any speech buffered before the stream was ready. */
@@ -157,6 +171,8 @@ export class AKOOLAvatarManager {
     if (this._destroyed) return;
     this._destroyed = true;
     this.queue = [];
+    this.readyResolvers.forEach((r) => r()); // unblock any awaitReady() waiters
+    this.readyResolvers = [];
 
     // Close the AKOOL session server-side first so billing stops even if the
     // SDK teardown hiccups.
