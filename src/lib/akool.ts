@@ -101,6 +101,14 @@ export class AKOOLAvatarManager {
           console.error('[AKOOL] exception:', e);
           if (!this._destroyed) this.options.onError?.(new Error(`AKOOL ${e.code}: ${e.msg}`));
         },
+        // Log what AKOOL sends back so we can find an explicit "avatar finished
+        // speaking" signal to drive listening instead of a duration estimate.
+        onStreamMessage: (uid, message) => {
+          console.log('[AKOOL] streamMessage', uid, JSON.stringify(message));
+        },
+        onMessageReceived: (m) => {
+          console.log('[AKOOL] messageReceived', JSON.stringify(m));
+        },
       });
 
       await sdk.joinChannel({

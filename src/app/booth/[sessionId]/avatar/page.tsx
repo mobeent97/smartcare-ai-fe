@@ -361,8 +361,10 @@ export default function AvatarConversationPage() {
       rec.continuous = false; // auto-finalizes on a pause → onend → auto-submit
       rec.maxAlternatives = 1;
       let errored = false;
+      console.log('[STT] starting recognition');
 
       rec.onresult = (e) => {
+        console.log('[STT] result', e.results?.length);
         let interim = '';
         for (let i = e.resultIndex; i < e.results.length; i++) {
           const r = e.results[i];
@@ -387,6 +389,7 @@ export default function AvatarConversationPage() {
       rec.onerror = (e) => {
         errored = true;
         const err = e?.error;
+        console.warn('[STT] error', err);
         if (err === 'not-allowed' || err === 'service-not-allowed') {
           setError('Microphone access denied. Please allow microphone permission and try again, or use keyboard input below.');
           setShowFallback(true);
@@ -400,6 +403,7 @@ export default function AvatarConversationPage() {
       };
 
       rec.onend = () => {
+        console.log('[STT] ended; heard=', JSON.stringify(transcriptRef.current));
         recognitionRef.current = null;
         if (teardownRef.current || errored) return;
         // Speech ended (endpointing). Conversational: auto-submit what we heard
