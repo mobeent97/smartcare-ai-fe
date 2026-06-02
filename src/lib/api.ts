@@ -155,6 +155,14 @@ class ApiClient {
     return res.data;
   }
 
+  async updateAnswer(sessionId: string, step: string, value: string) {
+    const res = await this.client.post<ApiResponse<{ ok: boolean; step: string; guidance: string }>>(
+      `/triage/sessions/${sessionId}/answer/update/`,
+      { step, value }
+    );
+    return res.data;
+  }
+
   /** Returns the absolute PDF download URL — opens in a new tab so the
    *  browser handles the file save dialog natively. */
   getSessionPdfUrl(sessionId: string): string {

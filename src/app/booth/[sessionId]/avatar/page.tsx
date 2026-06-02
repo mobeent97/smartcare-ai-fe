@@ -188,6 +188,7 @@ export default function AvatarConversationPage() {
   // Latest final transcript, readable synchronously when speech-end fires
   // (state lags) so we can auto-submit without a manual confirm tap.
   const transcriptRef = useRef('');
+  const interimRef = useRef(''); // last interim — fallback when onend fires before a final result
   // Live providers render their remote stream into this single <video>.
   const liveVideoRef = useRef<HTMLVideoElement>(null);
   // Idle watchdog: tears down the billed stream after inactivity (cost guard).
@@ -298,7 +299,15 @@ export default function AvatarConversationPage() {
   //    avatar is busy. Closes the billed stream after LIVE_IDLE_CLOSE_MS idle. ──
   useEffect(() => {
     if (!IS_LIVE_AVATAR) return;
-    if (phase === 'avatar_speaking' || phase === 'processing' || phase === 'thinking') {
+    // 'listening' = mic open, patient actively engaged → keep the stream alive
+    // (closing it makes the avatar vanish mid-interaction). Only arm idle-close
+    // on the passive 'confirming'/'tap_choice' waits.
+    if (
+      phase === 'avatar_speaking' ||
+      phase === 'processing' ||
+      phase === 'thinking' ||
+      phase === 'listening'
+    ) {
       cancelIdleClose();
     } else {
       armIdleClose();
@@ -340,6 +349,7 @@ export default function AvatarConversationPage() {
   function startListening() {
     setTranscript('');
     transcriptRef.current = '';
+    interimRef.current = '';
     setInterimTranscript('');
     setError('');
     setPhase('listening');
@@ -383,7 +393,7 @@ export default function AvatarConversationPage() {
             interim += text;
           }
         }
-        if (interim) { cancelIdleClose(); setInterimTranscript(interim); }
+        if (interim) { cancelIdleClose(); interimRef.current = interim; setInterimTranscript(interim); }
       };
 
       rec.onerror = (e) => {
@@ -410,9 +420,20 @@ export default function AvatarConversationPage() {
         // — no manual confirm tap. Empty capture falls back to confirm/keyboard.
         getActiveAvatarManager()?.showIdle();
         setInterimTranscript('');
-        const heard = transcriptRef.current.trim();
-        if (heard) submitAnswer(heard);
-        else setPhase('confirming');
+        // Prefer a finalized transcript; if Chrome ended before emitting a
+        // final (common on Linux), fall back to the last interim so heard
+        // words aren't lost.
+        const heard = (transcriptRef.current.trim() || interimRef.current.trim());
+        if (heard) {
+          setTranscript(heard);
+          transcriptRef.current = heard;
+          submitAnswer(heard);
+        } else {
+          // Nothing captured — surface the keyboard so the patient is never
+          // stuck on a phase with no actionable buttons.
+          setPhase('confirming');
+          setShowFallback(true);
+        }
       };
 
       recognitionRef.current = rec;

@@ -14,6 +14,7 @@
 import { GenericAgoraSDK } from 'akool-streaming-avatar-sdk';
 import type { IRemoteVideoTrack, IRemoteAudioTrack } from 'agora-rtc-sdk-ng';
 import { api } from './api';
+import { streamLog } from './stream-log';
 
 interface AvatarManagerOptions {
   sessionId: string;
@@ -24,6 +25,9 @@ interface AvatarManagerOptions {
   // AKOOL emits these via the data stream — the true avatar speech boundaries.
   onAudioStart?: () => void;
   onAudioEnd?: () => void;
+  // Fires when the avatar bot leaves the channel (AKOOL session ended — e.g.
+  // hit its duration cap). Lets the wrapper reopen a fresh session on next speak.
+  onStreamClosed?: () => void;
 }
 
 let _instance: AKOOLAvatarManager | null = null;
@@ -50,8 +54,13 @@ export class AKOOLAvatarManager {
     _instance = this;
   }
 
+  private _slog(event: string, fields: Record<string, unknown> = {}): void {
+    streamLog(this.options.sessionId, event, { akool_id: this.akoolSessionId, ...fields });
+  }
+
   async initialize(): Promise<{ akoolSessionId: string; mode: 'live' | 'mock' }> {
     this.options.onConnectionChange?.('connecting');
+    this._slog('INIT_START');
     try {
       const response = await api.createAvatarSession(
         this.options.sessionId,
@@ -68,6 +77,7 @@ export class AKOOLAvatarManager {
       console.log('[AKOOL] session created:', JSON.stringify(data));
       this.akoolSessionId = data.session_id;
       this.isMockMode = data.mode === 'mock';
+      this._slog('SESSION_CREATED', { channel: data.agora_channel, uid: data.agora_uid, mode: data.mode });
 
       if (this.isMockMode) {
         console.log('[AKOOL] mock mode — no live stream');
@@ -89,6 +99,7 @@ export class AKOOLAvatarManager {
               (track as IRemoteVideoTrack)?.play(this.options.videoElement);
               this.ready = true;
               console.log('[AKOOL] video published — stream ready, flushing queued speech');
+              this._slog('VIDEO_PUBLISHED', { queued: this.queue.length });
               this.options.onConnectionChange?.('connected');
               this.readyResolvers.forEach((r) => r());
               this.readyResolvers = [];
@@ -102,6 +113,7 @@ export class AKOOLAvatarManager {
         },
         onException: (e) => {
           console.error('[AKOOL] exception:', e);
+          this._slog('AKOOL_EXCEPTION', { code: e.code, msg: e.msg });
           if (!this._destroyed) this.options.onError?.(new Error(`AKOOL ${e.code}: ${e.msg}`));
         },
         // AKOOL signals real speech boundaries via {type:'event', pld:{event}}.
@@ -122,12 +134,46 @@ export class AKOOLAvatarManager {
         agora_uid: data.agora_uid ?? 0,
       });
       console.log('[AKOOL] joined channel, awaiting avatar publish…');
+      this._slog('JOINED_CHANNEL', { channel: data.agora_channel, uid: data.agora_uid });
+
+      // Agora connection-state transitions are the clearest signal for "stream
+      // disconnects often": logs every CONNECTED→RECONNECTING→DISCONNECTED with
+      // the SDK's reason (NETWORK_ERROR, LEAVE, etc).
+      try {
+        sdk.getClient().on(
+          'connection-state-change',
+          (cur: string, prev: string, reason?: string) => {
+            if (this._destroyed) return;
+            this._slog('AGORA_CONN_STATE', { from: prev, to: cur, reason });
+          },
+        );
+      } catch (e) {
+        console.warn('[AKOOL] could not attach connection-state handler:', e);
+      }
+
+      // Watch for the avatar bot leaving (AKOOL session duration cap, idle close,
+      // or network drop). When it goes, this session is dead — mark not-ready and
+      // signal the wrapper so the NEXT speak() reopens a fresh AKOOL session
+      // instead of sending text into a dead channel (the disappearing-avatar bug).
+      try {
+        const client = sdk.getClient();
+        client.on('user-left', (user: { uid: string | number }) => {
+          if (this._destroyed || this.akoolSessionId === null) return;
+          console.log('[AKOOL] avatar left channel (session ended):', user.uid);
+          this._slog('AVATAR_LEFT', { uid: user.uid });
+          this.ready = false;
+          this.options.onStreamClosed?.();
+        });
+      } catch (e) {
+        console.warn('[AKOOL] could not attach user-left handler:', e);
+      }
 
       return { akoolSessionId: this.akoolSessionId!, mode: data.mode ?? 'live' };
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       if (!this._destroyed) {
         console.error('[AKOOL] initialize error:', err);
+        this._slog('INIT_ERROR', { error: err.message });
         this.options.onError?.(err);
       }
       throw err;
@@ -181,6 +227,7 @@ export class AKOOLAvatarManager {
 
   async destroy(): Promise<void> {
     if (this._destroyed) return;
+    this._slog('DESTROY', { ready: this.ready });
     this._destroyed = true;
     this.queue = [];
     this.readyResolvers.forEach((r) => r()); // unblock any awaitReady() waiters

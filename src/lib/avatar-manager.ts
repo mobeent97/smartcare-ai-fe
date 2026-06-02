@@ -10,6 +10,7 @@
 // next speak after an idle close.
 
 import { VideoAvatarManager, type VideoState } from './video-avatar';
+import { streamLog } from './stream-log';
 
 export type AvatarProvider = 'video' | 'akool' | 'heygen';
 export type AvatarVisualState = VideoState; // 'idle' | 'speaking' | 'listening'
@@ -23,6 +24,10 @@ export interface AvatarManagerOptions {
   onWaveform?: (data: Float32Array) => void;
   onSubtitle?: (text: string) => void;
   onError?: (error: Error) => void;
+  /** Live providers only: the streaming session ended unexpectedly (e.g. hit its
+   *  duration cap). The next speak() transparently reopens. The page can use this
+   *  to reset its "stream ready" visual back to the connecting placeholder. */
+  onStreamClosed?: () => void;
 }
 
 export interface AvatarManager {
@@ -30,6 +35,10 @@ export interface AvatarManager {
   readonly isLive: boolean;
   /** Open the streaming session if not already open (lazy). No-op for video. */
   ensureOpen(): Promise<void>;
+  /** Open AND wait until the stream is actually live (video published), so a
+   *  caller can hold back speech/conversation until the face can speak. Optional;
+   *  callers should treat absence as "ready immediately". */
+  ensureReady?(): Promise<void>;
   speak(text: string): Promise<void>;
   interrupt(): void;
   showListening(): void;
@@ -37,6 +46,10 @@ export interface AvatarManager {
   /** Cost guard: tear down the live stream to stop billing while idle. No-op
    *  for video. ensureOpen() transparently reopens on the next speak(). */
   closeStream(): Promise<void>;
+  /** Triage is finishing: stop ever opening a NEW session (the backend has left
+   *  IN_PROGRESS, so create would 403), but let an already-live stream keep
+   *  speaking its final lines. Optional; absence = nothing to gate. */
+  preventReopen?(): void;
   /** Synchronous payload for a navigator.sendBeacon close on page unload.
    *  Null when there is nothing server-side to close (video/heygen). */
   beaconClosePayload(): { akoolSessionId: string; sessionId: string } | null;
@@ -73,6 +86,7 @@ class VideoLoopAvatar implements AvatarManager {
   }
 
   async ensureOpen(): Promise<void> { /* no stream — nothing to open */ }
+  preventReopen(): void { /* no stream — nothing to gate */ }
   async speak(text: string): Promise<void> { return this._mgr.speak(text); }
   interrupt(): void { this._mgr.interrupt(); }
   showListening(): void { this._mgr.showListening(); }
@@ -97,11 +111,31 @@ class AkoolAvatar implements AvatarManager {
   private _currentText = '';
   private _resolveSpeak: (() => void) | null = null;
   private _destroyed = false;
+  private _noReopen = false;
 
   constructor(opts: AvatarManagerOptions) { this._opts = opts; }
 
+  // Triage done: never create a fresh session again (would 403 on a
+  // non-IN_PROGRESS session). An already-live stream keeps working so it can
+  // speak the closing line; speak() on a closed stream becomes a silent no-op.
+  preventReopen(): void {
+    this._noReopen = true;
+    streamLog(this._opts.sessionId, 'MGR_PREVENT_REOPEN', { hasLiveStream: !!this._mgr });
+  }
+
+  // Open the stream AND wait until the avatar video has actually published, so
+  // the caller (realtime hybrid) can hold OpenAI's first utterance until the
+  // face is live — otherwise speech queues and replays out of sync once ready.
+  async ensureReady(): Promise<void> {
+    await this.ensureOpen();
+    if (this._destroyed || !this._mgr) return;
+    await this._mgr.awaitReady();
+  }
+
   async ensureOpen(): Promise<void> {
     if (this._destroyed || this._mgr) return;
+    if (this._noReopen) return; // triage finished — don't mint a new (403-ing) session
+    streamLog(this._opts.sessionId, 'MGR_REOPEN'); // _mgr was null → minting a fresh session
     const { AKOOLAvatarManager } = await import('./akool');
     const el = this._opts.getVideoElement?.();
     if (!el) throw new Error('AKOOL avatar: no video element to attach');
@@ -113,6 +147,7 @@ class AkoolAvatar implements AvatarManager {
       // Drive subtitles + speaking-state off AKOOL's real audio boundaries.
       onAudioStart: this._onAudioStart,
       onAudioEnd: this._onAudioEnd,
+      onStreamClosed: this._onStreamClosed,
     });
     const { akoolSessionId } = await mgr.initialize();
     if (this._destroyed) { await mgr.destroy(); return; }
@@ -143,6 +178,24 @@ class AkoolAvatar implements AvatarManager {
   };
   private _onAudioEnd = (): void => { this._finishSpeak(); };
 
+  // The AKOOL bot left the channel — the live session is dead. Drop the inner
+  // manager so the next speak() opens a fresh one (ensureOpen sees _mgr === null).
+  // Release any in-flight speak() and tell the page to reset its "stream ready"
+  // visual back to the connecting placeholder.
+  private _onStreamClosed = (): void => {
+    if (this._destroyed) return;
+    streamLog(this._opts.sessionId, 'MGR_STREAM_CLOSED', { noReopen: this._noReopen });
+    this._finishSpeak();
+    const dead = this._mgr;
+    this._mgr = null;
+    this._akoolSessionId = null;
+    // Leave the Agora channel cleanly so the fresh session's client doesn't
+    // collide on uid. Fire-and-forget — we don't block the next speak on it.
+    dead?.destroy().catch(() => {});
+    this._opts.onStreamClosed?.();
+    this._opts.onStateChange?.('idle');
+  };
+
   private _finishSpeak(): void {
     if (this._speakTimer) { clearTimeout(this._speakTimer); this._speakTimer = null; }
     this._stopSubtitles();
@@ -163,6 +216,7 @@ class AkoolAvatar implements AvatarManager {
   async closeStream(): Promise<void> {
     this._finishSpeak(); // release any in-flight speak() so callers don't hang
     if (this._mgr) {
+      streamLog(this._opts.sessionId, 'MGR_CLOSE_STREAM', { destroyed: this._destroyed });
       try { await this._mgr.destroy(); } catch { /* best-effort */ }
       this._mgr = null;
       this._akoolSessionId = null;
