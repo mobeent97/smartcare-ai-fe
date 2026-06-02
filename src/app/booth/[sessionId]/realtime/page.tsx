@@ -148,15 +148,10 @@ export default function RealtimeBoothPage() {
             next.add(step);
             return next;
           });
-          // Backend flips status→COMPLETED on the final answer (next_step
-          // end/results), BEFORE the model calls complete_triage. Stop reopening
-          // the avatar now so the post-answer response event can't 403 on a
-          // non-IN_PROGRESS session — but the still-live stream keeps speaking
-          // the closing lines (preventReopen, not a teardown).
-          if (d.next_step === 'end' || d.next_step === 'results') {
-            triageDoneRef.current = true;
-            avatarMgrRef.current?.preventReopen?.();
-          }
+          // NOTE: in realtime, vitals are taken AFTER the last question, so the
+          // session stays IN_PROGRESS until complete_triage. Do NOT mark triage
+          // done here — that happens in complete_triage. Marking it now would
+          // block the avatar reopen during the vitals steps.
           return {
             ok: true,
             next_step: d.next_step,
@@ -165,7 +160,7 @@ export default function RealtimeBoothPage() {
             guidance: d.next_question
               ? `Acknowledge briefly, then ask: "${d.next_question}"`
               : d.next_step === 'end' || d.next_step === 'results'
-                ? 'All required questions answered. Now call complete_triage.'
+                ? 'All questions answered. Now take the three vital signs in order (blood pressure, temperature, oxygen) via trigger_measurement if not already done, then call complete_triage.'
                 : 'Continue the conversation naturally.',
           };
         } catch (e) {
