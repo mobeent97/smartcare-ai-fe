@@ -94,6 +94,8 @@ class AkoolAvatar implements AvatarManager {
   private _akoolSessionId: string | null = null;
   private _speakTimer: ReturnType<typeof setTimeout> | null = null;
   private _subtitleTimer: ReturnType<typeof setInterval> | null = null;
+  private _currentText = '';
+  private _resolveSpeak: (() => void) | null = null;
   private _destroyed = false;
 
   constructor(opts: AvatarManagerOptions) { this._opts = opts; }
@@ -108,6 +110,9 @@ class AkoolAvatar implements AvatarManager {
       avatarType: this._opts.avatarType ?? 'nurse',
       videoElement: el,
       onError: this._opts.onError,
+      // Drive subtitles + speaking-state off AKOOL's real audio boundaries.
+      onAudioStart: this._onAudioStart,
+      onAudioEnd: this._onAudioEnd,
     });
     const { akoolSessionId } = await mgr.initialize();
     if (this._destroyed) { await mgr.destroy(); return; }
@@ -115,36 +120,48 @@ class AkoolAvatar implements AvatarManager {
     this._akoolSessionId = akoolSessionId;
   }
 
+  // speak() resolves on AKOOL's audio_end event (the true end of speech), with
+  // a generous timeout fallback in case the event never arrives.
   async speak(text: string): Promise<void> {
     if (this._destroyed || !text.trim()) return;
     await this.ensureOpen();
     if (this._destroyed || !this._mgr) return;
-    // Wait for the avatar video to actually publish before showing subtitles /
-    // the speaking state — the stream comes up late and the text is queued
-    // until then, so starting subtitles at call time runs them ahead of speech.
     await this._mgr.awaitReady();
     if (this._destroyed || !this._mgr) return;
-    this._opts.onStateChange?.('speaking');
-    this._startSubtitles(text);
-    await this._mgr.speak(text);
-    // No completion event over the data channel — estimate, then go idle.
+    this._currentText = text;
     await new Promise<void>((resolve) => {
-      this._speakTimer = setTimeout(resolve, estimateSpeechMs(text));
+      this._resolveSpeak = resolve;
+      this._speakTimer = setTimeout(() => this._finishSpeak(), estimateSpeechMs(text) + 10000);
+      this._mgr!.speak(text).catch(() => this._finishSpeak());
     });
+  }
+
+  private _onAudioStart = (): void => {
+    if (this._destroyed) return;
+    this._opts.onStateChange?.('speaking');
+    this._startSubtitles(this._currentText);
+  };
+  private _onAudioEnd = (): void => { this._finishSpeak(); };
+
+  private _finishSpeak(): void {
+    if (this._speakTimer) { clearTimeout(this._speakTimer); this._speakTimer = null; }
     this._stopSubtitles();
     if (!this._destroyed) this._opts.onStateChange?.('idle');
+    const r = this._resolveSpeak;
+    this._resolveSpeak = null;
+    if (r) r();
   }
 
   interrupt(): void {
-    this._clearTimers();
     this._mgr?.interrupt().catch(() => {});
+    this._finishSpeak();
     this._opts.onStateChange?.('listening');
   }
   showListening(): void { this._clearTimers(); this._opts.onStateChange?.('listening'); }
   showIdle(): void { this._clearTimers(); this._opts.onStateChange?.('idle'); }
 
   async closeStream(): Promise<void> {
-    this._clearTimers();
+    this._finishSpeak(); // release any in-flight speak() so callers don't hang
     if (this._mgr) {
       try { await this._mgr.destroy(); } catch { /* best-effort */ }
       this._mgr = null;

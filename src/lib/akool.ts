@@ -21,6 +21,9 @@ interface AvatarManagerOptions {
   videoElement: HTMLVideoElement;
   onConnectionChange?: (state: 'connecting' | 'connected' | 'disconnected') => void;
   onError?: (error: Error) => void;
+  // AKOOL emits these via the data stream — the true avatar speech boundaries.
+  onAudioStart?: () => void;
+  onAudioEnd?: () => void;
 }
 
 let _instance: AKOOLAvatarManager | null = null;
@@ -101,13 +104,14 @@ export class AKOOLAvatarManager {
           console.error('[AKOOL] exception:', e);
           if (!this._destroyed) this.options.onError?.(new Error(`AKOOL ${e.code}: ${e.msg}`));
         },
-        // Log what AKOOL sends back so we can find an explicit "avatar finished
-        // speaking" signal to drive listening instead of a duration estimate.
-        onStreamMessage: (uid, message) => {
-          console.log('[AKOOL] streamMessage', uid, JSON.stringify(message));
-        },
-        onMessageReceived: (m) => {
-          console.log('[AKOOL] messageReceived', JSON.stringify(m));
+        // AKOOL signals real speech boundaries via {type:'event', pld:{event}}.
+        // Drive UI/listening off these instead of a duration estimate.
+        onStreamMessage: (_uid, message) => {
+          if (message?.type === 'event') {
+            const ev = (message.pld as { event?: string })?.event;
+            if (ev === 'audio_start') { console.log('[AKOOL] audio_start'); this.options.onAudioStart?.(); }
+            else if (ev === 'audio_end') { console.log('[AKOOL] audio_end'); this.options.onAudioEnd?.(); }
+          }
         },
       });
 
