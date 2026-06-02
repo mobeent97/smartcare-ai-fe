@@ -127,10 +127,18 @@ export class AKOOLAvatarManager {
         },
       });
 
+      // Agora rejects an empty-string token ("Invalid token: ") — it wants null
+      // for a tokenless join. An empty token means the backend built none
+      // (AGORA_CERTIFICATE missing/unloaded); surface it so it's diagnosable.
+      const agoraToken = data.agora_token || null;
+      if (!agoraToken) {
+        this._slog('EMPTY_AGORA_TOKEN', { mode: data.mode });
+        console.warn('[AKOOL] empty agora_token from backend — joining tokenless (set AGORA_CERTIFICATE if the project requires a token)');
+      }
       await sdk.joinChannel({
         agora_app_id: data.agora_app_id ?? process.env.NEXT_PUBLIC_AGORA_APP_ID ?? '',
         agora_channel: data.agora_channel ?? '',
-        agora_token: data.agora_token ?? '',
+        agora_token: agoraToken as string,
         agora_uid: data.agora_uid ?? 0,
       });
       console.log('[AKOOL] joined channel, awaiting avatar publish…');
