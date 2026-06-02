@@ -80,78 +80,35 @@ const INTRO_SCRIPT =
   "Please speak your answers clearly, and take your time — there's no rush. " +
   "Let's get started.";
 
-// ─── Deepgram STT ─────────────────────────────────────────────────────────────
+// ─── Browser Speech-to-Text (Web Speech API) ───────────────────────────────────
+// Replaces Deepgram — zero cost, no API key, built-in endpointing. Chrome/Edge
+// expose it as webkitSpeechRecognition. continuous=false auto-finalizes on a
+// pause and fires onend, which we use to auto-submit the captured answer.
 
-const DG_WS_URL =
-  'wss://api.deepgram.com/v1/listen' +
-  '?model=nova-2&language=en-US&punctuate=true' +
-  '&interim_results=true&endpointing=700&utterance_end_ms=1000';
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+  onresult: ((e: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((e: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+};
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }>;
+};
 
-interface DeepgramSession {
-  ws: WebSocket;
-  recorder: MediaRecorder;
-  stream: MediaStream;
-  autoStopped: boolean;
-}
-
-async function openDeepgramSession(
-  token: string,
-  onInterim: (t: string) => void,
-  onFinal: (t: string) => void,
-  onAutoStop: () => void,
-  onError: (msg: string) => void,
-): Promise<DeepgramSession> {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const ws = new WebSocket(DG_WS_URL, ['token', token]);
-  const session: DeepgramSession = { ws, recorder: null as unknown as MediaRecorder, stream, autoStopped: false };
-
-  await new Promise<void>((resolve, reject) => {
-    ws.onopen = () => resolve();
-    ws.onerror = () => reject(new Error('Deepgram WebSocket failed to open'));
-    setTimeout(() => reject(new Error('Deepgram connection timeout')), 8000);
-  });
-
-  const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
-  session.recorder = recorder;
-
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data as string);
-      if (data.type === 'Results') {
-        const text: string = data.channel?.alternatives?.[0]?.transcript ?? '';
-        if (data.is_final) {
-          if (text) onFinal(text);
-          if (data.speech_final && !session.autoStopped) {
-            session.autoStopped = true;
-            onAutoStop();
-          }
-        } else {
-          onInterim(text);
-        }
-      }
-    } catch { /* ignore parse errors */ }
+function getSpeechRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
+  if (typeof window === 'undefined') return null;
+  const w = window as unknown as {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
   };
-
-  ws.onerror = () => onError('Microphone connection lost. Please try again.');
-
-  recorder.addEventListener('dataavailable', (e) => {
-    if (ws.readyState === WebSocket.OPEN && e.data.size > 0) ws.send(e.data);
-  });
-  recorder.start(200);
-
-  return session;
-}
-
-function closeDeepgramSession(session: DeepgramSession | null) {
-  if (!session) return;
-  try { session.recorder.stop(); } catch { /* ignore */ }
-  try { session.stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
-  try {
-    if (session.ws.readyState === WebSocket.OPEN) {
-      session.ws.send(JSON.stringify({ type: 'CloseStream' }));
-      session.ws.close();
-    }
-  } catch { /* ignore */ }
+  return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
 
 // ─── Step Dots ─────────────────────────────────────────────────────────────────
@@ -221,9 +178,8 @@ export default function AvatarConversationPage() {
   const [showFallback, setShowFallback] = useState(false);
   const [subtitle, setSubtitle] = useState('');
 
-  const deepgramRef = useRef<DeepgramSession | null>(null);
-  const dgTokenRef = useRef<string | null>(null);
-  const dgTokenExpiresAtRef = useRef<number>(0);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const teardownRef = useRef(false); // true on unmount → onend must not auto-submit
   const waveformRef = useRef<HTMLDivElement>(null);
   const pendingLLMSpeechRef = useRef<string | null>(null);
   // Latest final transcript, readable synchronously when speech-end fires
@@ -275,12 +231,6 @@ export default function AvatarConversationPage() {
       });
       if (cancelled) { await mgr.destroy(); return; }
 
-      // Prefetch Deepgram token while intro plays. Refresh 30s before expiry.
-      api.getDeepgramToken(sessionId).then((r) => {
-        dgTokenRef.current = r.key;
-        dgTokenExpiresAtRef.current = Date.now() + (r.ttl - 30) * 1000;
-      }).catch(() => {});
-
       await mgr.speak(INTRO_SCRIPT);
       if (cancelled) return;
       await mgr.speak(STEPS[0].question);
@@ -292,9 +242,11 @@ export default function AvatarConversationPage() {
 
     return () => {
       cancelled = true;
+      teardownRef.current = true;
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       getActiveAvatarManager()?.destroy().catch(() => {});
-      closeDeepgramSession(deepgramRef.current);
+      try { recognitionRef.current?.abort(); } catch { /* ignore */ }
+      recognitionRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -373,8 +325,8 @@ export default function AvatarConversationPage() {
     return () => { cancelled = true; };
   }, [stepIndex]);
 
-  // ── Mic (Deepgram) ──
-  async function startListening() {
+  // ── Mic (Web Speech API) ──
+  function startListening() {
     setTranscript('');
     transcriptRef.current = '';
     setInterimTranscript('');
@@ -382,63 +334,85 @@ export default function AvatarConversationPage() {
     setPhase('listening');
     getActiveAvatarManager()?.showListening();
 
+    const SR = getSpeechRecognitionCtor();
+    if (!SR) {
+      setError('Voice input is not supported in this browser. Please use keyboard input below.');
+      setShowFallback(true);
+      getActiveAvatarManager()?.showIdle();
+      setPhase('confirming');
+      return;
+    }
+
     try {
-      // Refetch if no token or near expiry
-      if (!dgTokenRef.current || Date.now() >= dgTokenExpiresAtRef.current) {
-        const r = await api.getDeepgramToken(sessionId);
-        dgTokenRef.current = r.key;
-        dgTokenExpiresAtRef.current = Date.now() + (r.ttl - 30) * 1000;
-      }
-      const session = await openDeepgramSession(
-        dgTokenRef.current,
-        (interim) => { cancelIdleClose(); setInterimTranscript(interim); },
-        (final) => setTranscript((prev) => {
-          const v = (prev + ' ' + final).trim();
-          transcriptRef.current = v;
-          return v;
-        }),
-        () => {
-          // Speech ended (endpointing). Conversational: auto-submit what we
-          // heard — no manual confirm tap. If nothing captured, fall back to
-          // the confirm/keyboard UI so the patient isn't stuck.
-          closeDeepgramSession(deepgramRef.current);
-          deepgramRef.current = null;
-          getActiveAvatarManager()?.showIdle();
-          setInterimTranscript('');
-          const heard = transcriptRef.current.trim();
-          if (heard) submitAnswer(heard);
-          else setPhase('confirming');
-        },
-        (msg) => {
-          closeDeepgramSession(deepgramRef.current);
-          deepgramRef.current = null;
-          getActiveAvatarManager()?.showIdle();
-          setError(msg);
+      const rec = new SR();
+      rec.lang = 'en-US';
+      rec.interimResults = true;
+      rec.continuous = false; // auto-finalizes on a pause → onend → auto-submit
+      rec.maxAlternatives = 1;
+      let errored = false;
+
+      rec.onresult = (e) => {
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          const text = r[0]?.transcript ?? '';
+          if (r.isFinal) {
+            const t = text.trim();
+            if (t) {
+              cancelIdleClose();
+              setTranscript((prev) => {
+                const v = (prev + ' ' + t).trim();
+                transcriptRef.current = v;
+                return v;
+              });
+            }
+          } else {
+            interim += text;
+          }
+        }
+        if (interim) { cancelIdleClose(); setInterimTranscript(interim); }
+      };
+
+      rec.onerror = (e) => {
+        errored = true;
+        const err = e?.error;
+        if (err === 'not-allowed' || err === 'service-not-allowed') {
+          setError('Microphone access denied. Please allow microphone permission and try again, or use keyboard input below.');
           setShowFallback(true);
-          setPhase('confirming');
-        },
-      );
-      deepgramRef.current = session;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Microphone error';
-      if (msg.includes('Permission') || msg.includes('NotAllowed') || msg.includes('denied')) {
-        setError('Microphone access denied. Please allow microphone permission and try again, or use keyboard input below.');
-        setShowFallback(true);
-      } else {
-        setError('Could not connect to voice service. Please use keyboard input below.');
-        setShowFallback(true);
-      }
+        } else if (err !== 'no-speech' && err !== 'aborted') {
+          setError('Voice input error. Please use keyboard input below.');
+          setShowFallback(true);
+        }
+        getActiveAvatarManager()?.showIdle();
+        setInterimTranscript('');
+        setPhase('confirming');
+      };
+
+      rec.onend = () => {
+        recognitionRef.current = null;
+        if (teardownRef.current || errored) return;
+        // Speech ended (endpointing). Conversational: auto-submit what we heard
+        // — no manual confirm tap. Empty capture falls back to confirm/keyboard.
+        getActiveAvatarManager()?.showIdle();
+        setInterimTranscript('');
+        const heard = transcriptRef.current.trim();
+        if (heard) submitAnswer(heard);
+        else setPhase('confirming');
+      };
+
+      recognitionRef.current = rec;
+      rec.start();
+    } catch {
+      setError('Could not start voice input. Please use keyboard input below.');
+      setShowFallback(true);
       getActiveAvatarManager()?.showIdle();
       setPhase('confirming');
     }
   }
 
   function stopListening() {
-    closeDeepgramSession(deepgramRef.current);
-    deepgramRef.current = null;
-    getActiveAvatarManager()?.showIdle();
-    setInterimTranscript('');
-    setPhase('confirming');
+    // stop() finalizes and fires onend → auto-submit of what was heard.
+    try { recognitionRef.current?.stop(); } catch { /* ignore */ }
   }
 
   // ── Vitals measurement sequence ──

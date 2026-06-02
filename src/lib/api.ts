@@ -155,13 +155,6 @@ class ApiClient {
     return res.data;
   }
 
-  async getDeepgramToken(sessionId: string): Promise<{ key: string; ttl: number }> {
-    const res = await this.client.get<ApiResponse<{ key: string; ttl: number }>>(
-      `/triage/stt/token/?session_id=${encodeURIComponent(sessionId)}`
-    );
-    return res.data.data as { key: string; ttl: number };
-  }
-
   /** Returns the absolute PDF download URL — opens in a new tab so the
    *  browser handles the file save dialog natively. */
   getSessionPdfUrl(sessionId: string): string {
