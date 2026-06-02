@@ -38,12 +38,8 @@ interface StepConfig {
 const STEPS: StepConfig[] = [
   {
     stepName: 'first_look',
-    question: 'Before we begin — are you experiencing a life-threatening emergency right now? Chest pain, difficulty breathing, severe bleeding, or loss of consciousness?',
-    inputType: 'tap',
-    tapOptions: [
-      { label: 'YES — I need emergency help', value: 'yes', danger: true },
-      { label: 'NO — Continue assessment', value: 'no' },
-    ],
+    question: 'Before we begin — are you experiencing a life-threatening emergency right now? Chest pain, difficulty breathing, severe bleeding, or loss of consciousness? Please answer yes or no.',
+    inputType: 'voice',
   },
   {
     stepName: 'complaint',
@@ -230,6 +226,9 @@ export default function AvatarConversationPage() {
   const dgTokenExpiresAtRef = useRef<number>(0);
   const waveformRef = useRef<HTMLDivElement>(null);
   const pendingLLMSpeechRef = useRef<string | null>(null);
+  // Latest final transcript, readable synchronously when speech-end fires
+  // (state lags) so we can auto-submit without a manual confirm tap.
+  const transcriptRef = useRef('');
   // Live providers render their remote stream into this single <video>.
   const liveVideoRef = useRef<HTMLVideoElement>(null);
   // Idle watchdog: tears down the billed stream after inactivity (cost guard).
@@ -286,7 +285,9 @@ export default function AvatarConversationPage() {
       if (cancelled) return;
       await mgr.speak(STEPS[0].question);
       if (cancelled) return;
-      setPhase(STEPS[0].inputType === 'tap' ? 'tap_choice' : 'listening');
+      // Conversational: auto-open the mic when the avatar finishes — no tap.
+      if (STEPS[0].inputType === 'tap') setPhase('tap_choice');
+      else startListening();
     })().catch(() => {});
 
     return () => {
@@ -364,7 +365,9 @@ export default function AvatarConversationPage() {
       if (!mgr) return;
       await mgr.speak(speechText);
       if (cancelled) return;
-      setPhase(STEPS[stepIndex].inputType === 'tap' ? 'tap_choice' : 'listening');
+      // Conversational: auto-open the mic when the avatar finishes — no tap.
+      if (STEPS[stepIndex].inputType === 'tap') setPhase('tap_choice');
+      else startListening();
     })().catch(() => {});
 
     return () => { cancelled = true; };
@@ -373,6 +376,7 @@ export default function AvatarConversationPage() {
   // ── Mic (Deepgram) ──
   async function startListening() {
     setTranscript('');
+    transcriptRef.current = '';
     setInterimTranscript('');
     setError('');
     setPhase('listening');
@@ -388,14 +392,22 @@ export default function AvatarConversationPage() {
       const session = await openDeepgramSession(
         dgTokenRef.current,
         (interim) => { cancelIdleClose(); setInterimTranscript(interim); },
-        (final) => setTranscript((prev) => (prev + ' ' + final).trim()),
+        (final) => setTranscript((prev) => {
+          const v = (prev + ' ' + final).trim();
+          transcriptRef.current = v;
+          return v;
+        }),
         () => {
-          // Auto-stop on speech_final
+          // Speech ended (endpointing). Conversational: auto-submit what we
+          // heard — no manual confirm tap. If nothing captured, fall back to
+          // the confirm/keyboard UI so the patient isn't stuck.
           closeDeepgramSession(deepgramRef.current);
           deepgramRef.current = null;
           getActiveAvatarManager()?.showIdle();
           setInterimTranscript('');
-          setPhase('confirming');
+          const heard = transcriptRef.current.trim();
+          if (heard) submitAnswer(heard);
+          else setPhase('confirming');
         },
         (msg) => {
           closeDeepgramSession(deepgramRef.current);
