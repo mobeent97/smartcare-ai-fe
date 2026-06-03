@@ -77,12 +77,24 @@ export class AKOOLAvatarManager {
       console.log('[AKOOL] session created:', JSON.stringify(data));
       this.akoolSessionId = data.session_id;
       this.isMockMode = data.mode === 'mock';
-      this._slog('SESSION_CREATED', { channel: data.agora_channel, uid: data.agora_uid, mode: data.mode });
+      this._slog('SESSION_CREATED', { provider: data.provider, channel: data.agora_channel, uid: data.agora_uid, mode: data.mode });
 
       if (this.isMockMode) {
         console.log('[AKOOL] mock mode — no live stream');
         this.options.onConnectionChange?.('connected');
         return { akoolSessionId: this.akoolSessionId!, mode: 'mock' };
+      }
+
+      // Provider mismatch guard: the FE is built for AKOOL but the backend's
+      // AVATAR_PROVIDER returned a different shape (e.g. 'video' = no Agora
+      // creds). Joining Agora with an empty token throws a cryptic
+      // "Invalid token:" — fail fast with an actionable message instead.
+      if ((data.provider && data.provider !== 'akool') || !data.agora_channel) {
+        this._slog('PROVIDER_MISMATCH', { provider: data.provider, hasChannel: !!data.agora_channel });
+        throw new Error(
+          `Avatar provider mismatch: FE expects 'akool' but backend returned '${data.provider ?? 'unknown'}'` +
+          ` (no Agora channel). Set backend AVATAR_PROVIDER=akool (and AGORA_CERTIFICATE) to match NEXT_PUBLIC_AVATAR_PROVIDER.`,
+        );
       }
 
       const sdk = new GenericAgoraSDK({ mode: 'rtc', codec: 'vp8' });
