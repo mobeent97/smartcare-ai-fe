@@ -155,11 +155,12 @@ class ApiClient {
     return res.data;
   }
 
-  async getDeepgramToken(sessionId: string): Promise<{ key: string; ttl: number }> {
-    const res = await this.client.get<ApiResponse<{ key: string; ttl: number }>>(
-      `/triage/stt/token/?session_id=${encodeURIComponent(sessionId)}`
+  async updateAnswer(sessionId: string, step: string, value: string) {
+    const res = await this.client.post<ApiResponse<{ ok: boolean; step: string; guidance: string }>>(
+      `/triage/sessions/${sessionId}/answer/update/`,
+      { step, value }
     );
-    return res.data.data as { key: string; ttl: number };
+    return res.data;
   }
 
   /** Returns the absolute PDF download URL — opens in a new tab so the

@@ -4,6 +4,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { RealtimeClient, type ToolDispatcher } from '@/lib/openai-realtime';
+import {
+  createAvatarManager,
+  getConfiguredProvider,
+  type AvatarManager,
+  type AvatarVisualState,
+} from '@/lib/avatar-manager';
+import { streamLog } from '@/lib/stream-log';
 
 type Phase = 'connecting' | 'listening' | 'thinking' | 'speaking' | 'error';
 
@@ -34,6 +41,14 @@ export default function RealtimeBoothPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const debugEnabled = searchParams.get('debug') === '1';
 
+  // HYBRID mode: when a live avatar provider (akool/heygen) is configured, the
+  // OpenAI Realtime model is used only as the BRAIN — mic VAD + transcript text
+  // + tool calls. Its spoken audio is muted, and each completed assistant text
+  // is spoken by the live avatar so the face actually lipsyncs. With provider
+  // 'video' we keep the original behaviour: OpenAI voice + mp4 loops.
+  const provider = getConfiguredProvider();
+  const HYBRID = provider !== 'video';
+
   const [phase, setPhase] = useState<Phase>('connecting');
   const [errorMsg, setErrorMsg] = useState('');
   const [userTranscript, setUserTranscript] = useState('');
@@ -53,8 +68,21 @@ export default function RealtimeBoothPage() {
   const clientRef = useRef<RealtimeClient | null>(null);
   const audioContainerRef = useRef<HTMLDivElement>(null);
   const assistantBufRef = useRef('');
+
+  // Live-avatar (hybrid) wiring
+  const [avatarState, setAvatarState] = useState<AvatarVisualState>('idle');
+  const [avatarOpened, setAvatarOpened] = useState(false); // true once the live stream has rendered a frame
+  const avatarVideoRef = useRef<HTMLVideoElement>(null);
+  const avatarMgrRef = useRef<AvatarManager | null>(null);
+  const triageDoneRef = useRef(false); // gate avatar reopen once triage is COMPLETED (create 403s on a non-IN_PROGRESS session)
   const speakStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioStartedAtRef = useRef<number>(0);
+  // After complete_triage we must wait for the avatar to FINISH the closing
+  // wait-time line before navigating to results — a blind timer cut it off
+  // mid-speech. Set pending=true; each finished speech (re)arms a short
+  // debounce, so the last spoken line wins. Hard fallback guards a stuck stream.
+  const redirectPendingRef = useRef(false);
+  const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pushDebug = (label: string, detail?: string) => {
     if (!debugEnabled) return;
@@ -93,6 +121,18 @@ export default function RealtimeBoothPage() {
       return null;
     };
 
+    // Navigate to results once the avatar has finished its closing line.
+    // Debounced: every time a post-completion speech ends we (re)arm this, so
+    // the LAST spoken line wins instead of a fixed timer cutting speech off.
+    const armRedirect = (delayMs: number) => {
+      if (!redirectPendingRef.current) return;
+      if (redirectTimerRef.current) clearTimeout(redirectTimerRef.current);
+      redirectTimerRef.current = setTimeout(() => {
+        redirectTimerRef.current = null;
+        if (!cancelled) router.push(`/booth/${sessionId}/results`);
+      }, delayMs);
+    };
+
     const tools: ToolDispatcher = {
       submit_answer: async ({ step, value }) => {
         const key = `submit_answer:${step}`;
@@ -108,6 +148,10 @@ export default function RealtimeBoothPage() {
             next.add(step);
             return next;
           });
+          // NOTE: in realtime, vitals are taken AFTER the last question, so the
+          // session stays IN_PROGRESS until complete_triage. Do NOT mark triage
+          // done here — that happens in complete_triage. Marking it now would
+          // block the avatar reopen during the vitals steps.
           return {
             ok: true,
             next_step: d.next_step,
@@ -116,12 +160,25 @@ export default function RealtimeBoothPage() {
             guidance: d.next_question
               ? `Acknowledge briefly, then ask: "${d.next_question}"`
               : d.next_step === 'end' || d.next_step === 'results'
-                ? 'All required questions answered. Now call complete_triage.'
+                ? 'All questions answered. Now take the three vital signs in order (blood pressure, temperature, oxygen) via trigger_measurement if not already done, then call complete_triage.'
                 : 'Continue the conversation naturally.',
           };
         } catch (e) {
           const msg = e instanceof Error ? e.message : 'submit_answer failed';
           return { ok: false, error: msg, guidance: 'Apologize briefly and try a different question.' };
+        }
+      },
+      update_answer: async ({ step, value }) => {
+        const key = `update_answer:${step}`;
+        const block = overBudget(key, PER_TOOL_LIMIT.submit_answer);
+        if (block) return { ok: false, error: block, guidance: block };
+        trackToolCall(key);
+        try {
+          const res = await api.updateAnswer(sessionId, step, value);
+          return res.data; // { ok, step, guidance }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : 'update_answer failed';
+          return { ok: false, error: msg, guidance: 'Briefly acknowledge and continue.' };
         }
       },
       trigger_measurement: async ({ device_type }) => {
@@ -185,6 +242,12 @@ export default function RealtimeBoothPage() {
         trackToolCall('complete_triage');
         try {
           setTriageDone(true);
+          triageDoneRef.current = true;
+          // Triage is done → the session leaves IN_PROGRESS, so minting a new
+          // avatar session would 403. Stop reopening but KEEP the live stream so
+          // it can speak the closing wait-time line; it's torn down on redirect/
+          // unmount below.
+          avatarMgrRef.current?.preventReopen?.();
           const res = await api.completeTriage(sessionId);
           const ctas = res.data.ctas_level;
           const specialty = res.data.routing_specialty;
@@ -195,9 +258,11 @@ export default function RealtimeBoothPage() {
             4: 'You will be seen within 60 minutes. Stay comfortable and let reception know if you feel worse.',
             5: 'You will be seen within 2 hours. Reception will call your name.',
           };
-          setTimeout(() => {
-            if (!cancelled) router.push(`/booth/${sessionId}/results`);
-          }, 4000);
+          // Defer navigation until the avatar finishes the closing line below
+          // (onResponseComplete re-arms armRedirect when speech ends). Hard
+          // fallback at 18s so a stuck/silent stream still moves on.
+          redirectPendingRef.current = true;
+          armRedirect(18000);
           return {
             ok: true,
             ctas_level: ctas,
@@ -232,19 +297,37 @@ export default function RealtimeBoothPage() {
             onConnected: () => {
               if (cancelled) return;
               reconnectAttempts = 0;            // healthy connection resets budget
-              setPhase('listening');
-              client.startConversation();
               pushDebug('connected');
+              // Hybrid: hold the model's first utterance until the AKOOL stream is
+              // actually live. Otherwise OpenAI greets (and may run ahead) while
+              // the avatar is still connecting — speech queues and replays out of
+              // sync once the stream publishes.
+              if (HYBRID && avatarMgrRef.current?.ensureReady) {
+                setPhase('connecting');
+                avatarMgrRef.current.ensureReady()
+                  .catch(() => {})
+                  .then(() => {
+                    if (cancelled) return;
+                    setPhase('listening');
+                    client.startConversation();
+                    pushDebug('avatar_ready_started');
+                  });
+              } else {
+                setPhase('listening');
+                client.startConversation();
+              }
             },
             onDisconnected: (reason) => {
               if (cancelled) return;
               pushDebug('disconnected', reason);
+              streamLog(sessionId, 'RT_DISCONNECTED', { reason, attempts: reconnectAttempts, triageDone: triageDoneRef.current });
               // One automatic reconnect on transient WebRTC failure. Mints fresh
               // ephemeral key (the old one is single-use). Skip on user-triggered
               // disconnects (destroyed) and after the budget is spent.
               if (reconnectAttempts < MAX_RECONNECTS) {
                 reconnectAttempts++;
                 pushDebug('reconnect_attempt', String(reconnectAttempts));
+                streamLog(sessionId, 'RT_RECONNECT_ATTEMPT', { attempt: reconnectAttempts });
                 setPhase('connecting');
                 clientRef.current?.destroy();
                 clientRef.current = null;
@@ -263,13 +346,19 @@ export default function RealtimeBoothPage() {
             onAssistantTranscript: (delta) => {
               if (cancelled) return;
               assistantBufRef.current += delta;
-              setAssistantSubtitle(assistantBufRef.current);
+              // Non-hybrid (video provider, OpenAI voice): subtitle tracks OpenAI
+              // text. Hybrid: AKOOL's onSubtitle owns the subtitle so it stays in
+              // sync with the avatar's actual speech.
+              if (!HYBRID) setAssistantSubtitle(assistantBufRef.current);
             },
             onResponseStart: () => {
               if (cancelled) return;
-              // New model response begins — clear previous subtitle for fresh turn.
+              // New model response begins — reset the text buffer for this turn.
               assistantBufRef.current = '';
-              setAssistantSubtitle('');
+              // Non-hybrid clears the subtitle here; hybrid lets AKOOL's onSubtitle
+              // own it (clears at the avatar's real speech end) so it doesn't blank
+              // while the avatar is still speaking the previous line.
+              if (!HYBRID) setAssistantSubtitle('');
               setAssistantTurnId((n) => n + 1);
               audioStartedAtRef.current = 0;
               if (speakStopTimerRef.current) {
@@ -280,6 +369,9 @@ export default function RealtimeBoothPage() {
             },
             onSpeakingStart: () => {
               if (cancelled) return;
+              // Hybrid: OpenAI audio is muted; the live avatar owns the speaking
+              // phase (set when we dispatch its speak() in onResponseComplete).
+              if (HYBRID) return;
               // Fires per transcript delta — record true audio start once per turn.
               const t = turnTimingRef.current;
               if (t.speakStartAt) {
@@ -300,6 +392,7 @@ export default function RealtimeBoothPage() {
             },
             onSpeakingStop: () => {
               if (cancelled) return;
+              if (HYBRID) return; // avatar speak()-promise drives the phase back to listening
               // Reset turn-start guard so next response measures latency fresh.
               turnTimingRef.current.speakStartAt = null;
               if (speakStopTimerRef.current) {
@@ -310,7 +403,40 @@ export default function RealtimeBoothPage() {
               pushDebug('speaking_stop');
             },
             onResponseComplete: (hadAudio: boolean) => {
-              if (cancelled || !hadAudio || !audioStartedAtRef.current) return;
+              if (cancelled) return;
+              // Hybrid: the full assistant text for this turn is now buffered.
+              // Hand it to the live avatar to speak with real lipsync. Tool-call-
+              // only responses carry no spoken text (hadAudio false) → skip.
+              if (HYBRID) {
+                const speech = assistantBufRef.current.trim();
+                // After triage completes the avatar is in no-reopen mode: speak()
+                // plays on the still-live stream (closing line) and silently
+                // no-ops if the stream already closed — so it never 403s, and the
+                // phase machine still advances back to listening either way.
+                if (!hadAudio || !speech || !avatarMgrRef.current) {
+                  // Closing turn carried no speech → don't hold the redirect
+                  // waiting on it; go shortly.
+                  if (redirectPendingRef.current) armRedirect(1500);
+                  return;
+                }
+                setPhase('speaking');
+                avatarMgrRef.current.speak(speech)
+                  .then(() => {
+                    if (cancelled) return;
+                    setPhase((p) => (p === 'speaking' ? 'listening' : p));
+                    // speak() resolves on AKOOL's audio_end → the closing line
+                    // actually finished. Re-arm the (debounced) redirect.
+                    if (redirectPendingRef.current) armRedirect(1200);
+                  })
+                  .catch(() => {
+                    if (cancelled) return;
+                    setPhase((p) => (p === 'speaking' ? 'listening' : p));
+                    if (redirectPendingRef.current) armRedirect(1200);
+                  });
+                pushDebug('avatar_speak', `words=${speech.split(/\s+/).length}`);
+                return;
+              }
+              if (!hadAudio || !audioStartedAtRef.current) return;
               // RTP audio plays in real time and keeps going for seconds after
               // response.done fires. Estimate total spoken duration from the
               // accumulated transcript: ~150 wpm ≈ 400 ms/word, plus a 1.2 s
@@ -343,6 +469,11 @@ export default function RealtimeBoothPage() {
             onUserSpeechStop: () => {
               if (cancelled) return;
               setPhase((p) => (p === 'speaking' ? p : 'thinking'));
+              // Hybrid: the patient finished a turn → the model is about to
+              // respond. Warm the AKOOL stream NOW (no-op if already open) so a
+              // reconnect after an idle-close overlaps with the model's thinking
+              // instead of adding its ~2-3s join to the visible gap.
+              if (HYBRID && !triageDoneRef.current) avatarMgrRef.current?.ensureOpen().catch(() => {});
               pushDebug('user_speech_stopped');
             },
             onError: (msg) => {
@@ -351,6 +482,9 @@ export default function RealtimeBoothPage() {
               pushDebug('error', msg);
             },
             onAudioElement: (el) => {
+              // Hybrid: silence the OpenAI voice — the live avatar speaks instead.
+              // The MediaStream still feeds the waveform analyser even when muted.
+              if (HYBRID) { el.muted = true; el.volume = 0; }
               if (audioContainerRef.current) {
                 audioContainerRef.current.innerHTML = '';
                 audioContainerRef.current.appendChild(el);
@@ -383,6 +517,36 @@ export default function RealtimeBoothPage() {
       }
     };
 
+    // Build the live avatar (lazy — the AKOOL/HeyGen stream only opens on the
+    // first speak() below, so nothing bills during connect). State changes drive
+    // the on-screen video; the OpenAI brain feeds it text in onResponseComplete.
+    if (HYBRID) {
+      createAvatarManager(provider, {
+        sessionId,
+        avatarType: 'nurse',
+        getVideoElement: () => avatarVideoRef.current,
+        onStateChange: (s) => {
+          if (cancelled) return;
+          setAvatarState(s);
+          if (s === 'speaking') setAvatarOpened(true);
+        },
+        // Drive the on-screen subtitle off AKOOL's REAL speech (word-by-word
+        // during audio_start→audio_end), NOT OpenAI's generation — otherwise
+        // the text races ahead of the avatar's voice while the stream loads.
+        onSubtitle: (text) => { if (!cancelled) setAssistantSubtitle(text); },
+        // Live session ended (duration cap / drop). Hide the live <video> and
+        // show the connecting placeholder again; the next speak() reopens.
+        onStreamClosed: () => {
+          if (cancelled) return;
+          setAvatarOpened(false);
+          pushDebug('avatar_stream_closed');
+        },
+        onError: () => { if (!cancelled) pushDebug('avatar_error'); },
+      })
+        .then((m) => { if (cancelled) { m.destroy().catch(() => {}); return; } avatarMgrRef.current = m; })
+        .catch(() => {});
+    }
+
     connectClient();
 
     return () => {
@@ -391,16 +555,46 @@ export default function RealtimeBoothPage() {
         clearTimeout(speakStopTimerRef.current);
         speakStopTimerRef.current = null;
       }
+      if (redirectTimerRef.current) {
+        clearTimeout(redirectTimerRef.current);
+        redirectTimerRef.current = null;
+      }
       clientRef.current?.destroy();
       clientRef.current = null;
+      avatarMgrRef.current?.destroy().catch(() => {});
+      avatarMgrRef.current = null;
     };
   }, [sessionId, router]);
 
+  // Beacon-close the billed live avatar session if the patient closes the tab
+  // mid-conversation, so idle minutes don't bleed.
+  useEffect(() => {
+    if (!HYBRID) return;
+    const onHide = () => {
+      if (document.visibilityState !== 'hidden') return;
+      const payload = avatarMgrRef.current?.beaconClosePayload();
+      if (!payload) return;
+      try {
+        navigator.sendBeacon(
+          api.getAvatarCloseUrl(),
+          new Blob([JSON.stringify(payload)], { type: 'application/json' }),
+        );
+      } catch { /* best-effort */ }
+    };
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', onHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('pagehide', onHide);
+    };
+  }, [HYBRID]);
+
   const isSpeaking = phase === 'speaking';
-  // Map conversation phase to one of the three pre-recorded loops.
-  // "thinking" and "connecting" share the idle loop — feels most natural.
-  const videoState: 'idle' | 'speaking' | 'listening' =
-    phase === 'speaking' ? 'speaking'
+  // Map conversation phase to one of the three pre-recorded loops (video
+  // provider). In hybrid the live avatar reports its own visual state.
+  const videoState: 'idle' | 'speaking' | 'listening' = HYBRID
+    ? avatarState
+    : phase === 'speaking' ? 'speaking'
       : phase === 'listening' ? 'listening'
         : 'idle';
   const phaseLabel = phase === 'speaking'
@@ -436,6 +630,7 @@ export default function RealtimeBoothPage() {
           0%, 100% { box-shadow: 0 0 60px rgba(9,246,238,0.25), inset 0 0 40px rgba(9,246,238,0.12); }
           50%      { box-shadow: 0 0 80px rgba(9,246,238,0.4),  inset 0 0 50px rgba(9,246,238,0.18); }
         }
+        @keyframes spin { to { transform: rotate(360deg); } }
         .fade-up { animation: fade-up 0.4s ease both; }
       `}</style>
 
@@ -551,36 +746,79 @@ export default function RealtimeBoothPage() {
               position: 'relative',
               animation: 'orb-glow 3s ease-in-out infinite',
             }}>
-              <video
-                src="/avatar/idle.mp4"
-                autoPlay loop muted playsInline
-                style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
-                  position: 'absolute', inset: 0,
-                  opacity: videoState === 'idle' ? 1 : 0,
-                  transition: 'opacity 0.25s ease',
-                }}
-              />
-              <video
-                src="/avatar/speaking.mp4"
-                autoPlay loop muted playsInline
-                style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
-                  position: 'absolute', inset: 0,
-                  opacity: videoState === 'speaking' ? 1 : 0,
-                  transition: 'opacity 0.25s ease',
-                }}
-              />
-              <video
-                src="/avatar/listening.mp4"
-                autoPlay loop muted playsInline
-                style={{
-                  width: '100%', height: '100%', objectFit: 'cover',
-                  position: 'absolute', inset: 0,
-                  opacity: videoState === 'listening' ? 1 : 0,
-                  transition: 'opacity 0.25s ease',
-                }}
-              />
+              {HYBRID ? (
+                <>
+                  {/* Connecting placeholder — NO local video in live-avatar mode.
+                      Shows until the AKOOL stream renders its first frame, and
+                      again if the session reopens mid-flow. */}
+                  <div
+                    style={{
+                      position: 'absolute', inset: 0,
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                      gap: 14,
+                      background: 'radial-gradient(circle at 50% 40%, rgba(9,246,238,0.06), var(--color-dash-card))',
+                      opacity: avatarOpened ? 0 : 1,
+                      transition: 'opacity 0.4s ease',
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    <div style={{
+                      width: 46, height: 46, borderRadius: '50%',
+                      border: '3px solid rgba(9,246,238,0.18)',
+                      borderTopColor: '#09f6ee',
+                      animation: 'spin 0.9s linear infinite',
+                    }} />
+                    <span style={{ color: 'rgba(134,223,220,0.7)', fontSize: 12, fontWeight: 600, letterSpacing: '0.04em' }}>
+                      Connecting to Nurse AI…
+                    </span>
+                  </div>
+                  {/* Live AKOOL/HeyGen avatar — Agora attaches the remote stream here.
+                      Muted: the avatar's voice plays via its own Agora audio track. */}
+                  <video
+                    ref={avatarVideoRef}
+                    autoPlay playsInline muted
+                    style={{
+                      width: '100%', height: '100%', objectFit: 'cover',
+                      position: 'absolute', inset: 0,
+                      opacity: avatarOpened ? 1 : 0,
+                      transition: 'opacity 0.4s ease',
+                    }}
+                  />
+                </>
+              ) : (
+                <>
+                  <video
+                    src="/avatar/idle.mp4"
+                    autoPlay loop muted playsInline
+                    style={{
+                      width: '100%', height: '100%', objectFit: 'cover',
+                      position: 'absolute', inset: 0,
+                      opacity: videoState === 'idle' ? 1 : 0,
+                      transition: 'opacity 0.25s ease',
+                    }}
+                  />
+                  <video
+                    src="/avatar/speaking.mp4"
+                    autoPlay loop muted playsInline
+                    style={{
+                      width: '100%', height: '100%', objectFit: 'cover',
+                      position: 'absolute', inset: 0,
+                      opacity: videoState === 'speaking' ? 1 : 0,
+                      transition: 'opacity 0.25s ease',
+                    }}
+                  />
+                  <video
+                    src="/avatar/listening.mp4"
+                    autoPlay loop muted playsInline
+                    style={{
+                      width: '100%', height: '100%', objectFit: 'cover',
+                      position: 'absolute', inset: 0,
+                      opacity: videoState === 'listening' ? 1 : 0,
+                      transition: 'opacity 0.25s ease',
+                    }}
+                  />
+                </>
+              )}
 
               {/* Live badge */}
               <div style={{
