@@ -107,9 +107,14 @@ class AkoolAvatar implements AvatarManager {
   private _mgr: import('./akool').AKOOLAvatarManager | null = null;
   private _akoolSessionId: string | null = null;
   private _speakTimer: ReturnType<typeof setTimeout> | null = null;
-  private _subtitleTimer: ReturnType<typeof setInterval> | null = null;
   private _currentText = '';
-  private _resolveSpeak: (() => void) | null = null;
+  // FIFO of pending speak() chunks. Sentence-streaming dispatches several
+  // chunks per model turn; AKOOL gets them strictly one at a time — the next
+  // is sent only after the previous chunk's audio_end. Rapid speak() calls on
+  // the old single-slot machinery overwrote each other's resolver and leaked
+  // promises.
+  private _speakQueue: Array<{ text: string; resolve: () => void }> = [];
+  private _speaking = false;
   private _destroyed = false;
   private _noReopen = false;
 
@@ -155,28 +160,67 @@ class AkoolAvatar implements AvatarManager {
     this._akoolSessionId = akoolSessionId;
   }
 
-  // speak() resolves on AKOOL's audio_end event (the true end of speech), with
-  // a generous timeout fallback in case the event never arrives.
+  // Each chunk resolves on AKOOL's audio_end event (the true end of speech),
+  // with a generous timeout fallback in case the event never arrives. Chunks
+  // queue FIFO so sentence-streamed calls play strictly in order.
   async speak(text: string): Promise<void> {
     if (this._destroyed || !text.trim()) return;
-    await this.ensureOpen();
-    if (this._destroyed || !this._mgr) return;
-    await this._mgr.awaitReady();
-    if (this._destroyed || !this._mgr) return;
-    this._currentText = text;
-    await new Promise<void>((resolve) => {
-      this._resolveSpeak = resolve;
-      this._speakTimer = setTimeout(() => this._finishSpeak(), estimateSpeechMs(text) + 10000);
-      this._mgr!.speak(text).catch(() => this._finishSpeak());
+    return new Promise<void>((resolve) => {
+      this._speakQueue.push({ text: text.trim(), resolve });
+      this._pump();
     });
+  }
+
+  private _pump(): void {
+    if (this._speaking || this._destroyed || this._speakQueue.length === 0) return;
+    this._speaking = true;
+    const item = this._speakQueue[0];
+    (async () => {
+      await this.ensureOpen();
+      if (this._destroyed || !this._mgr) { this._finishCurrent(); return; }
+      await this._mgr.awaitReady();
+      if (this._destroyed || !this._mgr) { this._finishCurrent(); return; }
+      this._currentText = item.text;
+      this._speakTimer = setTimeout(() => this._finishCurrent(), estimateSpeechMs(item.text) + 10000);
+      this._mgr.speak(item.text).catch(() => this._finishCurrent());
+    })().catch(() => this._finishCurrent());
   }
 
   private _onAudioStart = (): void => {
     if (this._destroyed) return;
     this._opts.onStateChange?.('speaking');
-    this._startSubtitles(this._currentText);
+    // Subtitle = the sentence the avatar is speaking RIGHT NOW — synced by
+    // construction, replacing the fixed 380ms/word reveal that drifted from
+    // the real speech rate.
+    this._opts.onSubtitle?.(this._currentText);
   };
-  private _onAudioEnd = (): void => { this._finishSpeak(); };
+  private _onAudioEnd = (): void => { this._finishCurrent(); };
+
+  // Complete the chunk at the queue head and start the next one. The subtitle
+  // and visual state only reset when the whole queue drains, so back-to-back
+  // sentences don't flicker through 'idle'.
+  private _finishCurrent(): void {
+    if (this._speakTimer) { clearTimeout(this._speakTimer); this._speakTimer = null; }
+    const item = this._speakQueue.shift();
+    this._speaking = false;
+    if (this._speakQueue.length === 0) {
+      this._opts.onSubtitle?.('');
+      if (!this._destroyed) this._opts.onStateChange?.('idle');
+    }
+    item?.resolve();
+    this._pump();
+  }
+
+  // Resolve every queued chunk (interrupt / close / stream died) so awaiting
+  // callers never hang.
+  private _drainQueue(): void {
+    if (this._speakTimer) { clearTimeout(this._speakTimer); this._speakTimer = null; }
+    const items = this._speakQueue;
+    this._speakQueue = [];
+    this._speaking = false;
+    this._opts.onSubtitle?.('');
+    items.forEach((i) => i.resolve());
+  }
 
   // The AKOOL bot left the channel — the live session is dead. Drop the inner
   // manager so the next speak() opens a fresh one (ensureOpen sees _mgr === null).
@@ -185,7 +229,7 @@ class AkoolAvatar implements AvatarManager {
   private _onStreamClosed = (): void => {
     if (this._destroyed) return;
     streamLog(this._opts.sessionId, 'MGR_STREAM_CLOSED', { noReopen: this._noReopen });
-    this._finishSpeak();
+    this._drainQueue();
     const dead = this._mgr;
     this._mgr = null;
     this._akoolSessionId = null;
@@ -196,25 +240,16 @@ class AkoolAvatar implements AvatarManager {
     this._opts.onStateChange?.('idle');
   };
 
-  private _finishSpeak(): void {
-    if (this._speakTimer) { clearTimeout(this._speakTimer); this._speakTimer = null; }
-    this._stopSubtitles();
-    if (!this._destroyed) this._opts.onStateChange?.('idle');
-    const r = this._resolveSpeak;
-    this._resolveSpeak = null;
-    if (r) r();
-  }
-
   interrupt(): void {
     this._mgr?.interrupt().catch(() => {});
-    this._finishSpeak();
+    this._drainQueue();
     this._opts.onStateChange?.('listening');
   }
-  showListening(): void { this._clearTimers(); this._opts.onStateChange?.('listening'); }
-  showIdle(): void { this._clearTimers(); this._opts.onStateChange?.('idle'); }
+  showListening(): void { this._opts.onStateChange?.('listening'); }
+  showIdle(): void { this._opts.onStateChange?.('idle'); }
 
   async closeStream(): Promise<void> {
-    this._finishSpeak(); // release any in-flight speak() so callers don't hang
+    this._drainQueue(); // release any in-flight speak() so callers don't hang
     if (this._mgr) {
       streamLog(this._opts.sessionId, 'MGR_CLOSE_STREAM', { destroyed: this._destroyed });
       try { await this._mgr.destroy(); } catch { /* best-effort */ }
@@ -232,24 +267,6 @@ class AkoolAvatar implements AvatarManager {
     this._destroyed = true;
     await this.closeStream();
     if (_active === this) _active = null;
-  }
-
-  private _startSubtitles(text: string): void {
-    if (!this._opts.onSubtitle) return;
-    const words = text.split(/\s+/);
-    let idx = 0;
-    this._subtitleTimer = setInterval(() => {
-      if (idx >= words.length) { this._stopSubtitles(); return; }
-      this._opts.onSubtitle!(words.slice(0, ++idx).join(' '));
-    }, 380);
-  }
-  private _stopSubtitles(): void {
-    if (this._subtitleTimer) { clearInterval(this._subtitleTimer); this._subtitleTimer = null; }
-    this._opts.onSubtitle?.('');
-  }
-  private _clearTimers(): void {
-    if (this._speakTimer) { clearTimeout(this._speakTimer); this._speakTimer = null; }
-    this._stopSubtitles();
   }
 }
 

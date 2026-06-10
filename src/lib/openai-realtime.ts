@@ -165,6 +165,15 @@ export class RealtimeClient {
     this.send({ type: 'response.create' });
   }
 
+  /** Gate the mic track. Hybrid mode disables it while the live avatar speaks
+   *  through the kiosk speaker — otherwise the model hears its own lines as
+   *  "user speech" (echo cancellation doesn't cover a separate audio path)
+   *  and produces ghost turns. Track stays live (no renegotiation); disabled
+   *  tracks transmit silence. */
+  setMicEnabled(enabled: boolean): void {
+    this.localStream?.getAudioTracks().forEach((t) => { t.enabled = enabled; });
+  }
+
   private handleServerEvent(raw: string): void {
     let evt: Record<string, unknown>;
     try {

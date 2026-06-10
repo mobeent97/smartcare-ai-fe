@@ -68,6 +68,12 @@ export default function RealtimeBoothPage() {
   const clientRef = useRef<RealtimeClient | null>(null);
   const audioContainerRef = useRef<HTMLDivElement>(null);
   const assistantBufRef = useRef('');
+  // Sentence-streaming state (hybrid): how much of assistantBufRef has been
+  // flushed to the avatar, how many chunks are queued/speaking, and whether
+  // this model turn produced any speech at all (tool-call-only turns don't).
+  const flushedLenRef = useRef(0);
+  const inFlightSpeaksRef = useRef(0);
+  const turnHadSpeechRef = useRef(false);
 
   // Live-avatar (hybrid) wiring
   const [avatarState, setAvatarState] = useState<AvatarVisualState>('idle');
@@ -131,6 +137,35 @@ export default function RealtimeBoothPage() {
         redirectTimerRef.current = null;
         if (!cancelled) router.push(`/booth/${sessionId}/results`);
       }, delayMs);
+    };
+
+    // Hybrid sentence-streaming: hand one sentence at a time to the live
+    // avatar AS the model generates, instead of waiting for the full response.
+    // The avatar starts speaking sentence 1 while the model is still writing
+    // sentence 3 — this overlap is the single biggest dead-air cut. The mic is
+    // gated off from the first chunk until the last finishes so the model
+    // doesn't hear the kiosk speaker as user speech.
+    const dispatchAvatarChunk = (text: string) => {
+      const chunk = text.trim();
+      if (!chunk || !avatarMgrRef.current) return;
+      turnHadSpeechRef.current = true;
+      if (inFlightSpeaksRef.current === 0) clientRef.current?.setMicEnabled(false);
+      inFlightSpeaksRef.current++;
+      setPhase('speaking');
+      pushDebug('avatar_chunk', `words=${chunk.split(/\s+/).length} inflight=${inFlightSpeaksRef.current}`);
+      avatarMgrRef.current.speak(chunk)
+        .catch(() => {})
+        .then(() => {
+          if (cancelled) return;
+          inFlightSpeaksRef.current = Math.max(0, inFlightSpeaksRef.current - 1);
+          if (inFlightSpeaksRef.current === 0) {
+            clientRef.current?.setMicEnabled(true);
+            setPhase((p) => (p === 'speaking' ? 'listening' : p));
+            // Last chunk actually finished (AKOOL audio_end) — re-arm the
+            // (debounced) results redirect if triage is wrapping up.
+            if (redirectPendingRef.current) armRedirect(1200);
+          }
+        });
     };
 
     const tools: ToolDispatcher = {
@@ -349,12 +384,34 @@ export default function RealtimeBoothPage() {
               // Non-hybrid (video provider, OpenAI voice): subtitle tracks OpenAI
               // text. Hybrid: AKOOL's onSubtitle owns the subtitle so it stays in
               // sync with the avatar's actual speech.
-              if (!HYBRID) setAssistantSubtitle(assistantBufRef.current);
+              if (!HYBRID) {
+                setAssistantSubtitle(assistantBufRef.current);
+                return;
+              }
+              // Sentence-streaming: flush each completed sentence to the avatar
+              // as it lands. Boundary = . ! ? … followed by whitespace/end (the
+              // lookahead keeps decimals like "37.5" intact); the 25-char floor
+              // keeps abbreviations ("Dr.") and tiny fragments buffered until a
+              // real sentence completes. Last qualifying boundary wins, so a
+              // burst of deltas flushes as one chunk.
+              const unflushed = assistantBufRef.current.slice(flushedLenRef.current);
+              const MIN_CHUNK = 25;
+              let cut = -1;
+              for (const m of unflushed.matchAll(/[.!?…](?=\s|$)/g)) {
+                if (m.index !== undefined && m.index + 1 >= MIN_CHUNK) cut = m.index + 1;
+              }
+              if (cut > 0) {
+                const chunk = unflushed.slice(0, cut);
+                flushedLenRef.current += cut;
+                dispatchAvatarChunk(chunk);
+              }
             },
             onResponseStart: () => {
               if (cancelled) return;
               // New model response begins — reset the text buffer for this turn.
               assistantBufRef.current = '';
+              flushedLenRef.current = 0;
+              turnHadSpeechRef.current = false;
               // Non-hybrid clears the subtitle here; hybrid lets AKOOL's onSubtitle
               // own it (clears at the avatar's real speech end) so it doesn't blank
               // while the avatar is still speaking the previous line.
@@ -404,36 +461,23 @@ export default function RealtimeBoothPage() {
             },
             onResponseComplete: (hadAudio: boolean) => {
               if (cancelled) return;
-              // Hybrid: the full assistant text for this turn is now buffered.
-              // Hand it to the live avatar to speak with real lipsync. Tool-call-
-              // only responses carry no spoken text (hadAudio false) → skip.
+              // Hybrid: sentences were already streamed to the avatar as they
+              // were generated (onAssistantTranscript). Flush whatever trails
+              // the last sentence boundary, then handle the speechless case.
+              // After triage completes the avatar is in no-reopen mode: speak()
+              // plays on the still-live stream (closing line) and silently
+              // no-ops if the stream already closed — so it never 403s, and the
+              // chunk accounting still drives the phase back to listening.
               if (HYBRID) {
-                const speech = assistantBufRef.current.trim();
-                // After triage completes the avatar is in no-reopen mode: speak()
-                // plays on the still-live stream (closing line) and silently
-                // no-ops if the stream already closed — so it never 403s, and the
-                // phase machine still advances back to listening either way.
-                if (!hadAudio || !speech || !avatarMgrRef.current) {
-                  // Closing turn carried no speech → don't hold the redirect
-                  // waiting on it; go shortly.
-                  if (redirectPendingRef.current) armRedirect(1500);
-                  return;
+                const remainder = assistantBufRef.current.slice(flushedLenRef.current).trim();
+                flushedLenRef.current = assistantBufRef.current.length;
+                if (remainder) dispatchAvatarChunk(remainder);
+                // Tool-call-only / speechless closing turn → don't hold the
+                // redirect waiting on avatar speech that will never come.
+                if (!turnHadSpeechRef.current && redirectPendingRef.current
+                    && inFlightSpeaksRef.current === 0) {
+                  armRedirect(1500);
                 }
-                setPhase('speaking');
-                avatarMgrRef.current.speak(speech)
-                  .then(() => {
-                    if (cancelled) return;
-                    setPhase((p) => (p === 'speaking' ? 'listening' : p));
-                    // speak() resolves on AKOOL's audio_end → the closing line
-                    // actually finished. Re-arm the (debounced) redirect.
-                    if (redirectPendingRef.current) armRedirect(1200);
-                  })
-                  .catch(() => {
-                    if (cancelled) return;
-                    setPhase((p) => (p === 'speaking' ? 'listening' : p));
-                    if (redirectPendingRef.current) armRedirect(1200);
-                  });
-                pushDebug('avatar_speak', `words=${speech.split(/\s+/).length}`);
                 return;
               }
               if (!hadAudio || !audioStartedAtRef.current) return;
