@@ -437,11 +437,19 @@ export default function RealtimeBoothPage() {
                 return;
               }
               if (!hadAudio || !audioStartedAtRef.current) return;
-              // RTP audio plays in real time and keeps going for seconds after
-              // response.done fires. Estimate total spoken duration from the
-              // accumulated transcript: ~150 wpm ≈ 400 ms/word, plus a 1.2 s
-              // tail to cover the model's natural ending pauses + jitter buffer.
-              // Subtract however much has already played (now - audioStarted).
+              // GA WebRTC emits output_audio_buffer.stopped at the EXACT end of
+              // playback — onSpeakingStop flips the phase then. No estimator
+              // needed; scheduling one anyway would cut speech off early.
+              if (client.hasPlaybackEvents) {
+                pushDebug('response_complete', 'exact playback events');
+                return;
+              }
+              // Fallback (no playback events): RTP audio plays in real time and
+              // keeps going for seconds after response.done fires. Estimate
+              // total spoken duration from the accumulated transcript:
+              // ~150 wpm ≈ 400 ms/word, plus a 1.2 s tail to cover the model's
+              // natural ending pauses + jitter buffer. Subtract however much
+              // has already played (now - audioStarted).
               const text = assistantBufRef.current.trim();
               const wordCount = text ? text.split(/\s+/).length : 0;
               const totalAudioMs = wordCount * 400 + 1200;
@@ -456,6 +464,19 @@ export default function RealtimeBoothPage() {
                 pushDebug('speaking_stop_timer');
               }, remaining);
               pushDebug('response_complete', `words=${wordCount} hold=${remaining}ms`);
+            },
+            onBargeIn: () => {
+              if (cancelled) return;
+              // Server cleared the output buffer — the patient interrupted.
+              // Drop straight to listening; cancel any pending estimator stop.
+              if (speakStopTimerRef.current) {
+                clearTimeout(speakStopTimerRef.current);
+                speakStopTimerRef.current = null;
+              }
+              turnTimingRef.current.speakStartAt = null;
+              audioStartedAtRef.current = 0;
+              if (!HYBRID) setPhase((p) => (p === 'speaking' ? 'listening' : p));
+              pushDebug('barge_in');
             },
             onUserSpeechStart: () => {
               if (cancelled) return;
@@ -1167,6 +1188,9 @@ function Waveform({ audioEl, active }: { audioEl: HTMLAudioElement | null; activ
         const stream = audioEl.srcObject as MediaStream | null;
         if (!stream || stream.getAudioTracks().length === 0) return false;
         audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+        // Autoplay policy can start the context suspended (no user gesture
+        // yet) — bars would freeze at zero. Resume is async; best-effort.
+        if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
         const src = audioCtx.createMediaStreamSource(stream);
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 128;
@@ -1178,13 +1202,6 @@ function Waveform({ audioEl, active }: { audioEl: HTMLAudioElement | null; activ
         return false;
       }
     };
-
-    let setupOk = setup();
-    if (!setupOk) {
-      // Retry once after stream attaches
-      const retry = setTimeout(() => { setupOk = setup(); }, 500);
-      return () => clearTimeout(retry);
-    }
 
     const NUM_BARS = 24;
     const CENTER_FALLOFF = (i: number) => {
@@ -1216,9 +1233,21 @@ function Waveform({ audioEl, active }: { audioEl: HTMLAudioElement | null; activ
       }
       rafRef.current = requestAnimationFrame(tick);
     };
-    tick();
+
+    // The srcObject may not be attached yet on first run — retry once after it
+    // lands. The retry must also START the render loop (a prior version set a
+    // flag but never called tick(), leaving the waveform permanently dead).
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    if (setup()) {
+      tick();
+    } else {
+      retryTimer = setTimeout(() => {
+        if (setup()) tick();
+      }, 500);
+    }
 
     return () => {
+      if (retryTimer) clearTimeout(retryTimer);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       audioCtx?.close().catch(() => {});
     };
