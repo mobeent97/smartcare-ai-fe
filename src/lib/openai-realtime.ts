@@ -43,12 +43,15 @@ export interface RealtimeCallbacks {
 
 export interface ToolDispatcher {
   submit_answer: (args: { step: string; value: string }) => Promise<unknown>;
+  update_answer: (args: { step: string; value: string }) => Promise<unknown>;
   trigger_measurement: (args: { device_type: string }) => Promise<unknown>;
   flag_emergency: (args: { reason: string }) => Promise<unknown>;
   complete_triage: (args: Record<string, never>) => Promise<unknown>;
 }
 
-const REALTIME_URL = 'https://api.openai.com/v1/realtime';
+// GA SDP exchange endpoint. The beta `/v1/realtime?model=...` route was
+// replaced by `/v1/realtime/calls` (model is baked into the ephemeral key).
+const REALTIME_URL = 'https://api.openai.com/v1/realtime/calls';
 
 export class RealtimeClient {
   private pc: RTCPeerConnection | null = null;
@@ -122,13 +125,12 @@ export class RealtimeClient {
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
 
-    const resp = await fetch(`${REALTIME_URL}?model=${encodeURIComponent(this.mint.model)}`, {
+    const resp = await fetch(REALTIME_URL, {
       method: 'POST',
       body: offer.sdp,
       headers: {
         Authorization: `Bearer ${this.mint.client_secret}`,
         'Content-Type': 'application/sdp',
-        'OpenAI-Beta': 'realtime=v1',
       },
     });
     if (!resp.ok) {
@@ -166,6 +168,7 @@ export class RealtimeClient {
         this.callbacks.onResponseStart();
         break;
       case 'response.audio.delta':
+      case 'response.output_audio.delta': // GA rename
         // Fires for WebSocket transport; for WebRTC the audio rides the RTP
         // track, not the data channel — see audio_transcript.delta below.
         this.currentResponseHasAudio = true;
@@ -173,6 +176,8 @@ export class RealtimeClient {
         break;
       case 'response.audio.done':
       case 'response.audio_transcript.done':
+      case 'response.output_audio.done':            // GA rename
+      case 'response.output_audio_transcript.done': // GA rename
         // Both signal "no more data being generated" — but RTP audio is still
         // buffered and playing for several seconds after. Do NOT stop phase
         // here. The page schedules a transcript-length timer in
@@ -195,7 +200,8 @@ export class RealtimeClient {
         if (text) this.callbacks.onUserTranscript(text, true);
         break;
       }
-      case 'response.audio_transcript.delta': {
+      case 'response.audio_transcript.delta':
+      case 'response.output_audio_transcript.delta': { // GA rename
         const delta = (evt.delta as string) || '';
         if (delta) {
           // Over WebRTC this is the reliable "model is now producing speech"

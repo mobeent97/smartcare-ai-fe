@@ -16,6 +16,9 @@ const AVATAR_PROVIDER = getConfiguredProvider();
 const IS_LIVE_AVATAR = AVATAR_PROVIDER !== 'video';
 // Tear down a live (billed) stream after this much idle time; reopens on next speak.
 const LIVE_IDLE_CLOSE_MS = 25_000;
+// Wait after the avatar finishes before auto-opening the mic, so the audio tail
+// doesn't bleed into the mic (the avatar hearing itself).
+const POST_SPEECH_ECHO_GUARD_MS = 700;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -38,12 +41,8 @@ interface StepConfig {
 const STEPS: StepConfig[] = [
   {
     stepName: 'first_look',
-    question: 'Before we begin — are you experiencing a life-threatening emergency right now? Chest pain, difficulty breathing, severe bleeding, or loss of consciousness?',
-    inputType: 'tap',
-    tapOptions: [
-      { label: 'YES — I need emergency help', value: 'yes', danger: true },
-      { label: 'NO — Continue assessment', value: 'no' },
-    ],
+    question: 'Before we begin — are you experiencing a life-threatening emergency right now? Chest pain, difficulty breathing, severe bleeding, or loss of consciousness? Please answer yes or no.',
+    inputType: 'voice',
   },
   {
     stepName: 'complaint',
@@ -84,78 +83,35 @@ const INTRO_SCRIPT =
   "Please speak your answers clearly, and take your time — there's no rush. " +
   "Let's get started.";
 
-// ─── Deepgram STT ─────────────────────────────────────────────────────────────
+// ─── Browser Speech-to-Text (Web Speech API) ───────────────────────────────────
+// Replaces Deepgram — zero cost, no API key, built-in endpointing. Chrome/Edge
+// expose it as webkitSpeechRecognition. continuous=false auto-finalizes on a
+// pause and fires onend, which we use to auto-submit the captured answer.
 
-const DG_WS_URL =
-  'wss://api.deepgram.com/v1/listen' +
-  '?model=nova-2&language=en-US&punctuate=true' +
-  '&interim_results=true&endpointing=700&utterance_end_ms=1000';
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  maxAlternatives: number;
+  start: () => void;
+  stop: () => void;
+  abort: () => void;
+  onresult: ((e: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((e: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+};
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }>;
+};
 
-interface DeepgramSession {
-  ws: WebSocket;
-  recorder: MediaRecorder;
-  stream: MediaStream;
-  autoStopped: boolean;
-}
-
-async function openDeepgramSession(
-  token: string,
-  onInterim: (t: string) => void,
-  onFinal: (t: string) => void,
-  onAutoStop: () => void,
-  onError: (msg: string) => void,
-): Promise<DeepgramSession> {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const ws = new WebSocket(DG_WS_URL, ['token', token]);
-  const session: DeepgramSession = { ws, recorder: null as unknown as MediaRecorder, stream, autoStopped: false };
-
-  await new Promise<void>((resolve, reject) => {
-    ws.onopen = () => resolve();
-    ws.onerror = () => reject(new Error('Deepgram WebSocket failed to open'));
-    setTimeout(() => reject(new Error('Deepgram connection timeout')), 8000);
-  });
-
-  const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' });
-  session.recorder = recorder;
-
-  ws.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data as string);
-      if (data.type === 'Results') {
-        const text: string = data.channel?.alternatives?.[0]?.transcript ?? '';
-        if (data.is_final) {
-          if (text) onFinal(text);
-          if (data.speech_final && !session.autoStopped) {
-            session.autoStopped = true;
-            onAutoStop();
-          }
-        } else {
-          onInterim(text);
-        }
-      }
-    } catch { /* ignore parse errors */ }
+function getSpeechRecognitionCtor(): (new () => SpeechRecognitionLike) | null {
+  if (typeof window === 'undefined') return null;
+  const w = window as unknown as {
+    SpeechRecognition?: new () => SpeechRecognitionLike;
+    webkitSpeechRecognition?: new () => SpeechRecognitionLike;
   };
-
-  ws.onerror = () => onError('Microphone connection lost. Please try again.');
-
-  recorder.addEventListener('dataavailable', (e) => {
-    if (ws.readyState === WebSocket.OPEN && e.data.size > 0) ws.send(e.data);
-  });
-  recorder.start(200);
-
-  return session;
-}
-
-function closeDeepgramSession(session: DeepgramSession | null) {
-  if (!session) return;
-  try { session.recorder.stop(); } catch { /* ignore */ }
-  try { session.stream.getTracks().forEach((t) => t.stop()); } catch { /* ignore */ }
-  try {
-    if (session.ws.readyState === WebSocket.OPEN) {
-      session.ws.send(JSON.stringify({ type: 'CloseStream' }));
-      session.ws.close();
-    }
-  } catch { /* ignore */ }
+  return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
 
 // ─── Step Dots ─────────────────────────────────────────────────────────────────
@@ -225,11 +181,14 @@ export default function AvatarConversationPage() {
   const [showFallback, setShowFallback] = useState(false);
   const [subtitle, setSubtitle] = useState('');
 
-  const deepgramRef = useRef<DeepgramSession | null>(null);
-  const dgTokenRef = useRef<string | null>(null);
-  const dgTokenExpiresAtRef = useRef<number>(0);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const teardownRef = useRef(false); // true on unmount → onend must not auto-submit
   const waveformRef = useRef<HTMLDivElement>(null);
   const pendingLLMSpeechRef = useRef<string | null>(null);
+  // Latest final transcript, readable synchronously when speech-end fires
+  // (state lags) so we can auto-submit without a manual confirm tap.
+  const transcriptRef = useRef('');
+  const interimRef = useRef(''); // last interim — fallback when onend fires before a final result
   // Live providers render their remote stream into this single <video>.
   const liveVideoRef = useRef<HTMLVideoElement>(null);
   // Idle watchdog: tears down the billed stream after inactivity (cost guard).
@@ -276,24 +235,26 @@ export default function AvatarConversationPage() {
       });
       if (cancelled) { await mgr.destroy(); return; }
 
-      // Prefetch Deepgram token while intro plays. Refresh 30s before expiry.
-      api.getDeepgramToken(sessionId).then((r) => {
-        dgTokenRef.current = r.key;
-        dgTokenExpiresAtRef.current = Date.now() + (r.ttl - 30) * 1000;
-      }).catch(() => {});
-
       await mgr.speak(INTRO_SCRIPT);
       if (cancelled) return;
       await mgr.speak(STEPS[0].question);
       if (cancelled) return;
-      setPhase(STEPS[0].inputType === 'tap' ? 'tap_choice' : 'listening');
+      // Conversational: auto-open the mic ONLY for voice steps (not vitals/tap).
+      if (STEPS[0].inputType === 'voice') {
+        await new Promise((r) => setTimeout(r, POST_SPEECH_ECHO_GUARD_MS));
+        if (!cancelled) startListening();
+      } else {
+        setPhase('tap_choice');
+      }
     })().catch(() => {});
 
     return () => {
       cancelled = true;
+      teardownRef.current = true;
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       getActiveAvatarManager()?.destroy().catch(() => {});
-      closeDeepgramSession(deepgramRef.current);
+      try { recognitionRef.current?.abort(); } catch { /* ignore */ }
+      recognitionRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -338,7 +299,15 @@ export default function AvatarConversationPage() {
   //    avatar is busy. Closes the billed stream after LIVE_IDLE_CLOSE_MS idle. ──
   useEffect(() => {
     if (!IS_LIVE_AVATAR) return;
-    if (phase === 'avatar_speaking' || phase === 'processing' || phase === 'thinking') {
+    // 'listening' = mic open, patient actively engaged → keep the stream alive
+    // (closing it makes the avatar vanish mid-interaction). Only arm idle-close
+    // on the passive 'confirming'/'tap_choice' waits.
+    if (
+      phase === 'avatar_speaking' ||
+      phase === 'processing' ||
+      phase === 'thinking' ||
+      phase === 'listening'
+    ) {
       cancelIdleClose();
     } else {
       armIdleClose();
@@ -364,69 +333,122 @@ export default function AvatarConversationPage() {
       if (!mgr) return;
       await mgr.speak(speechText);
       if (cancelled) return;
-      setPhase(STEPS[stepIndex].inputType === 'tap' ? 'tap_choice' : 'listening');
+      // Conversational: auto-open the mic ONLY for voice steps (not vitals/tap).
+      if (STEPS[stepIndex].inputType === 'voice') {
+        await new Promise((r) => setTimeout(r, POST_SPEECH_ECHO_GUARD_MS));
+        if (!cancelled) startListening();
+      } else {
+        setPhase('tap_choice');
+      }
     })().catch(() => {});
 
     return () => { cancelled = true; };
   }, [stepIndex]);
 
-  // ── Mic (Deepgram) ──
-  async function startListening() {
+  // ── Mic (Web Speech API) ──
+  function startListening() {
     setTranscript('');
+    transcriptRef.current = '';
+    interimRef.current = '';
     setInterimTranscript('');
     setError('');
     setPhase('listening');
     getActiveAvatarManager()?.showListening();
 
+    const SR = getSpeechRecognitionCtor();
+    if (!SR) {
+      setError('Voice input is not supported in this browser. Please use keyboard input below.');
+      setShowFallback(true);
+      getActiveAvatarManager()?.showIdle();
+      setPhase('confirming');
+      return;
+    }
+
     try {
-      // Refetch if no token or near expiry
-      if (!dgTokenRef.current || Date.now() >= dgTokenExpiresAtRef.current) {
-        const r = await api.getDeepgramToken(sessionId);
-        dgTokenRef.current = r.key;
-        dgTokenExpiresAtRef.current = Date.now() + (r.ttl - 30) * 1000;
-      }
-      const session = await openDeepgramSession(
-        dgTokenRef.current,
-        (interim) => { cancelIdleClose(); setInterimTranscript(interim); },
-        (final) => setTranscript((prev) => (prev + ' ' + final).trim()),
-        () => {
-          // Auto-stop on speech_final
-          closeDeepgramSession(deepgramRef.current);
-          deepgramRef.current = null;
-          getActiveAvatarManager()?.showIdle();
-          setInterimTranscript('');
-          setPhase('confirming');
-        },
-        (msg) => {
-          closeDeepgramSession(deepgramRef.current);
-          deepgramRef.current = null;
-          getActiveAvatarManager()?.showIdle();
-          setError(msg);
+      const rec = new SR();
+      rec.lang = 'en-US';
+      rec.interimResults = true;
+      rec.continuous = false; // auto-finalizes on a pause → onend → auto-submit
+      rec.maxAlternatives = 1;
+      let errored = false;
+      console.log('[STT] starting recognition');
+
+      rec.onresult = (e) => {
+        console.log('[STT] result', e.results?.length);
+        let interim = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          const text = r[0]?.transcript ?? '';
+          if (r.isFinal) {
+            const t = text.trim();
+            if (t) {
+              cancelIdleClose();
+              setTranscript((prev) => {
+                const v = (prev + ' ' + t).trim();
+                transcriptRef.current = v;
+                return v;
+              });
+            }
+          } else {
+            interim += text;
+          }
+        }
+        if (interim) { cancelIdleClose(); interimRef.current = interim; setInterimTranscript(interim); }
+      };
+
+      rec.onerror = (e) => {
+        errored = true;
+        const err = e?.error;
+        console.warn('[STT] error', err);
+        if (err === 'not-allowed' || err === 'service-not-allowed') {
+          setError('Microphone access denied. Please allow microphone permission and try again, or use keyboard input below.');
           setShowFallback(true);
+        } else if (err !== 'no-speech' && err !== 'aborted') {
+          setError('Voice input error. Please use keyboard input below.');
+          setShowFallback(true);
+        }
+        getActiveAvatarManager()?.showIdle();
+        setInterimTranscript('');
+        setPhase('confirming');
+      };
+
+      rec.onend = () => {
+        console.log('[STT] ended; heard=', JSON.stringify(transcriptRef.current));
+        recognitionRef.current = null;
+        if (teardownRef.current || errored) return;
+        // Speech ended (endpointing). Conversational: auto-submit what we heard
+        // — no manual confirm tap. Empty capture falls back to confirm/keyboard.
+        getActiveAvatarManager()?.showIdle();
+        setInterimTranscript('');
+        // Prefer a finalized transcript; if Chrome ended before emitting a
+        // final (common on Linux), fall back to the last interim so heard
+        // words aren't lost.
+        const heard = (transcriptRef.current.trim() || interimRef.current.trim());
+        if (heard) {
+          setTranscript(heard);
+          transcriptRef.current = heard;
+          submitAnswer(heard);
+        } else {
+          // Nothing captured — surface the keyboard so the patient is never
+          // stuck on a phase with no actionable buttons.
           setPhase('confirming');
-        },
-      );
-      deepgramRef.current = session;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Microphone error';
-      if (msg.includes('Permission') || msg.includes('NotAllowed') || msg.includes('denied')) {
-        setError('Microphone access denied. Please allow microphone permission and try again, or use keyboard input below.');
-        setShowFallback(true);
-      } else {
-        setError('Could not connect to voice service. Please use keyboard input below.');
-        setShowFallback(true);
-      }
+          setShowFallback(true);
+        }
+      };
+
+      recognitionRef.current = rec;
+      rec.start();
+    } catch {
+      setError('Could not start voice input. Please use keyboard input below.');
+      setShowFallback(true);
       getActiveAvatarManager()?.showIdle();
       setPhase('confirming');
     }
   }
 
   function stopListening() {
-    closeDeepgramSession(deepgramRef.current);
-    deepgramRef.current = null;
-    getActiveAvatarManager()?.showIdle();
-    setInterimTranscript('');
-    setPhase('confirming');
+    // stop() finalizes and fires onend → auto-submit of what was heard.
+    try { recognitionRef.current?.stop(); } catch { /* ignore */ }
   }
 
   // ── Vitals measurement sequence ──
