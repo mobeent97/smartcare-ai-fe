@@ -20,7 +20,18 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     title: 'SmartCare',
-    statusBarStyle: 'black-translucent',
+    // 'black' — NOT 'black-translucent'.
+    //
+    // black-translucent makes the web view full-screen with the status bar
+    // floating over it, which then depends entirely on env(safe-area-inset-top)
+    // being reported correctly. In standalone iOS that inset is frequently 0 in
+    // this mode, so the padding collapses and the header slides under the clock
+    // and the notch. 'black' makes iOS lay the web view out BELOW the status
+    // bar, so an overlap is structurally impossible rather than merely
+    // compensated for. The safe-area padding stays in place — it contributes 0
+    // here and still does the right thing for the home indicator and for
+    // landscape left/right insets.
+    statusBarStyle: 'black',
   },
   formatDetection: {
     telephone: false,   // stop iOS turning vitals and ages into phone links

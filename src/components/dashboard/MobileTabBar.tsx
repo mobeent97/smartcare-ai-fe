@@ -77,7 +77,10 @@ export function MobileTabBar() {
         backdropFilter: 'blur(20px) saturate(180%)',
         WebkitBackdropFilter: 'blur(20px) saturate(180%)',
         borderTop: '1px solid rgba(21,81,80,0.6)',
-        paddingBottom: 'var(--safe-bottom)',
+        // Floor of 8px: if the inset is reported as 0 (which iOS does in some
+        // standalone configurations) the bar would otherwise sit flush against
+        // the home indicator.
+        paddingBottom: 'max(8px, var(--safe-bottom))',
       }}
     >
       {tabs.map((t) => {
