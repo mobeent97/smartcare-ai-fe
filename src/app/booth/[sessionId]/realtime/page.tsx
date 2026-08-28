@@ -46,8 +46,13 @@ export default function RealtimeBoothPage() {
   // + tool calls. Its spoken audio is muted, and each completed assistant text
   // is spoken by the live avatar so the face actually lipsyncs. With provider
   // 'video' we keep the original behaviour: OpenAI voice + mp4 loops.
+  // VOICE_ONLY ('none'): no face at all. The Realtime model's own audio plays
+  // straight out of the audio element — no second vendor doing TTS, so nothing
+  // to keep in sync and no stream-open wait. Lowest-latency configuration we
+  // have. The screen shows a voice orb + captions instead of the mp4 loops.
   const provider = getConfiguredProvider();
-  const HYBRID = provider !== 'video';
+  const VOICE_ONLY = provider === 'none';
+  const HYBRID = provider !== 'video' && !VOICE_ONLY;
 
   const [phase, setPhase] = useState<Phase>('connecting');
   const [errorMsg, setErrorMsg] = useState('');
@@ -850,6 +855,8 @@ export default function RealtimeBoothPage() {
                     }}
                   />
                 </>
+              ) : VOICE_ONLY ? (
+                <VoiceOrb phase={phase} />
               ) : (
                 <>
                   <video
@@ -1207,6 +1214,58 @@ function ProgressStrip({ completed, done }: { completed: Set<string>; done: bool
       }}>
         {completedCount}/{FLOW_STEPS.length}
       </span>
+    </div>
+  );
+}
+
+// ─── Voice-only orb ────────────────────────────────────────────────────────
+// Stands in for the avatar when AVATAR_PROVIDER=none. Purely CSS/phase-driven:
+// no video element, no media stream, nothing to load — so it can never be the
+// thing that delays or desyncs speech. The Waveform overlay still renders on
+// top of it from the Realtime audio element.
+function VoiceOrb({ phase }: { phase: Phase }) {
+  const speaking = phase === 'speaking';
+  const listening = phase === 'listening';
+  const thinking = phase === 'thinking';
+  const connecting = phase === 'connecting';
+  const accent = phase === 'error' ? '#dc2626' : thinking ? '#a855f7' : '#09f6ee';
+
+  return (
+    <div style={{
+      position: 'absolute', inset: 0,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: 'radial-gradient(circle at 50% 45%, rgba(9,246,238,0.07), var(--color-dash-card))',
+    }}>
+      {/* Expanding rings while the nurse is talking */}
+      {speaking && (
+        <>
+          <div style={{
+            position: 'absolute', width: 150, height: 150, borderRadius: '50%',
+            border: `2px solid ${accent}`, animation: 'speak-ring 1.6s ease-out infinite',
+          }} />
+          <div style={{
+            position: 'absolute', width: 150, height: 150, borderRadius: '50%',
+            border: `2px solid ${accent}`, animation: 'speak-ring2 1.6s ease-out 0.5s infinite',
+          }} />
+        </>
+      )}
+
+      <div style={{
+        width: 150, height: 150, borderRadius: '50%',
+        background: `radial-gradient(circle at 50% 40%, ${accent}33, ${accent}0d 60%, transparent 72%)`,
+        border: `2px solid ${accent}${listening ? '99' : '4d'}`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        animation: connecting ? 'spin 1.4s linear infinite' : 'orb-glow 3s ease-in-out infinite',
+        transition: 'border-color 0.3s ease',
+      }}>
+        <div style={{
+          width: listening ? 34 : 22, height: listening ? 34 : 22,
+          borderRadius: '50%', background: accent,
+          opacity: connecting ? 0.35 : 0.85,
+          animation: (speaking || listening) ? 'status-dot 1s ease-in-out infinite' : 'none',
+          transition: 'width 0.3s ease, height 0.3s ease',
+        }} />
+      </div>
     </div>
   );
 }

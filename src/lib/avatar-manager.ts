@@ -1,5 +1,7 @@
-// Unified avatar manager — one interface over three providers (video | akool |
-// heygen) so the booth page is provider-agnostic. The active provider is set
+// Unified avatar manager — one interface over the avatar providers (video |
+// akool | heygen) so the booth page is provider-agnostic. 'none' is a fourth
+// setting rather than a manager: it means "no face at all", and pages that
+// support it skip manager creation entirely. The active provider is set
 // per deploy via NEXT_PUBLIC_AVATAR_PROVIDER (kept in sync with the backend
 // AVATAR_PROVIDER env). See AVATAR_PROVIDER_PLAN.md.
 //
@@ -12,7 +14,7 @@
 import { VideoAvatarManager, type VideoState } from './video-avatar';
 import { streamLog } from './stream-log';
 
-export type AvatarProvider = 'video' | 'akool' | 'heygen';
+export type AvatarProvider = 'none' | 'video' | 'akool' | 'heygen';
 export type AvatarVisualState = VideoState; // 'idle' | 'speaking' | 'listening'
 
 export interface AvatarManagerOptions {
@@ -273,7 +275,8 @@ class AkoolAvatar implements AvatarManager {
 // ─── factory ────────────────────────────────────────────────────────────────
 export function getConfiguredProvider(): AvatarProvider {
   const p = (process.env.NEXT_PUBLIC_AVATAR_PROVIDER || 'video').toLowerCase();
-  return p === 'akool' || p === 'heygen' ? p : 'video';
+  if (p === 'akool' || p === 'heygen' || p === 'none') return p;
+  return 'video';
 }
 
 export async function createAvatarManager(
@@ -283,6 +286,10 @@ export async function createAvatarManager(
   // Replace any prior active manager (StrictMode double-mount safety).
   if (_active) { await _active.destroy().catch(() => {}); }
 
+  // NOTE: 'none' has no manager of its own. The realtime booth never calls
+  // this factory in that mode (it plays the model's audio directly), but the
+  // older avatar flow still needs *something* that speaks, so 'none' falls
+  // through to the cost-free mp4 + OpenAI TTS manager here.
   let mgr: AvatarManager;
   if (provider === 'akool') {
     mgr = new AkoolAvatar(opts);

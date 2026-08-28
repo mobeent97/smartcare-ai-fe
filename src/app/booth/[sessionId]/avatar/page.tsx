@@ -13,7 +13,9 @@ import {
 // Provider chosen per deploy (kept in sync with backend AVATAR_PROVIDER).
 // 'video' = mp4 loop (zero streaming cost, default); 'akool'/'heygen' = live.
 const AVATAR_PROVIDER = getConfiguredProvider();
-const IS_LIVE_AVATAR = AVATAR_PROVIDER !== 'video';
+// 'none' has no remote stream to attach — treat it like the local video loop
+// provider here. Only akool/heygen publish a stream into <video>.
+const IS_LIVE_AVATAR = AVATAR_PROVIDER !== 'video' && AVATAR_PROVIDER !== 'none';
 // Tear down a live (billed) stream after this much idle time; reopens on next speak.
 const LIVE_IDLE_CLOSE_MS = 25_000;
 // Wait after the avatar finishes before auto-opening the mic, so the audio tail
