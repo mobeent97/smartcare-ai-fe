@@ -20,6 +20,10 @@ export interface RealtimeSessionMint {
   expires_at: number;
   realtime_session_id: string;
   model: string;
+  /** SDP-exchange endpoint for the provider that minted this key. Supplied by
+   *  the backend so the host can never disagree with the key. Absent on an
+   *  older backend, in which case the OpenAI default below applies. */
+  webrtc_url?: string;
 }
 
 export interface RealtimeCallbacks {
@@ -37,13 +41,34 @@ export interface RealtimeCallbacks {
   onUserSpeechStart: () => void;
   /** User stopped talking, model is processing. UI should show "thinking". */
   onUserSpeechStop: () => void;
+  /** The user barged in while the model was speaking — the server cleared the
+   *  output audio buffer (output_audio_buffer.cleared). UI should drop straight
+   *  back to "listening". */
+  onBargeIn?: () => void;
   onError: (msg: string) => void;
+  /** The model went silent when it should have spoken, and the client is
+   *  re-prompting it. `attempt` is 1-based. Diagnostic only — the recovery is
+   *  automatic. */
+  onStall?: (attempt: number) => void;
   onAudioElement: (el: HTMLAudioElement) => void;
+  /** Connection-setup checkpoints, for cold-start instrumentation. Fired as
+   *  each stage of connect() begins and ends so the page can see which stage
+   *  owns the time before the first word. */
+  onPhaseMark?: (mark: string) => void;
+}
+
+/** Structured values the model can hand over alongside the raw answer, so the
+ *  server never has to run an LLM parse while the model waits on the response. */
+export interface AnswerExtras {
+  symptoms?: string[];
+  patient_name?: string;
+  patient_age?: number;
+  patient_sex?: string;
 }
 
 export interface ToolDispatcher {
-  submit_answer: (args: { step: string; value: string }) => Promise<unknown>;
-  update_answer: (args: { step: string; value: string }) => Promise<unknown>;
+  submit_answer: (args: { step: string; value: string } & AnswerExtras) => Promise<unknown>;
+  update_answer: (args: { step: string; value: string } & AnswerExtras) => Promise<unknown>;
   trigger_measurement: (args: { device_type: string }) => Promise<unknown>;
   flag_emergency: (args: { reason: string }) => Promise<unknown>;
   complete_triage: (args: Record<string, never>) => Promise<unknown>;
@@ -51,7 +76,15 @@ export interface ToolDispatcher {
 
 // GA SDP exchange endpoint. The beta `/v1/realtime?model=...` route was
 // replaced by `/v1/realtime/calls` (model is baked into the ephemeral key).
-const REALTIME_URL = 'https://api.openai.com/v1/realtime/calls';
+const DEFAULT_REALTIME_URL = 'https://api.openai.com/v1/realtime/calls';
+
+// How long to wait for the model to start responding after we asked it to,
+// before assuming the turn is wedged. Normal time-to-first-token is a few
+// hundred ms, so this only fires on a genuine fault.
+const RESPONSE_STALL_MS = 4000;
+// Cap the retries so a persistently broken session surfaces an error instead
+// of looping response.create forever.
+const MAX_STALL_RETRIES = 2;
 
 export class RealtimeClient {
   private pc: RTCPeerConnection | null = null;
@@ -63,12 +96,39 @@ export class RealtimeClient {
   // responses emit response.done with no audio — we must not flip phase to
   // "listening" in that case (the model will immediately start a new response).
   private currentResponseHasAudio = false;
+  // GA WebRTC emits output_audio_buffer.started/stopped/cleared — exact
+  // playback boundaries. Once seen, the page can skip its transcript-length
+  // playback estimator and trust onSpeakingStop from the .stopped event.
+  private playbackEventsSeen = false;
+  // response.create while a response is still active errors ("conversation
+  // already has an active response"). Track active state; if a tool result
+  // lands mid-response, defer the create until response.done.
+  //
+  // This flag is set optimistically when we send a create, because a second
+  // tool finishing before the server's response.created round trip would
+  // otherwise double-create. That optimism is also how the session used to
+  // wedge: if the server REJECTED our create, neither response.created nor
+  // response.done ever arrived, the flag stayed true forever, and every later
+  // tool result deferred to a response.done that would never come. The booth
+  // went silent until the patient spoke again (their voice creates a response
+  // server-side). Hence the watchdog below — nothing is allowed to leave the
+  // nurse permanently mute.
+  private responseActive = false;
+  private pendingResponseCreate = false;
+  private stallTimer: ReturnType<typeof setTimeout> | null = null;
+  private stallRetries = 0;
 
   constructor(
     private mint: RealtimeSessionMint,
     private callbacks: RealtimeCallbacks,
     private tools: ToolDispatcher,
   ) {}
+
+  /** True once the server has emitted output_audio_buffer.* events — playback
+   *  boundaries are exact and the caller can skip duration estimation. */
+  get hasPlaybackEvents(): boolean {
+    return this.playbackEventsSeen;
+  }
 
   /** Returns seconds remaining on the ephemeral key. */
   secondsUntilExpiry(): number {
@@ -99,9 +159,11 @@ export class RealtimeClient {
     };
 
     // Local mic
+    this.callbacks.onPhaseMark?.('mic_start');
     this.localStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
+    this.callbacks.onPhaseMark?.('mic_ready');
     for (const track of this.localStream.getTracks()) {
       this.pc.addTrack(track, this.localStream);
     }
@@ -109,6 +171,7 @@ export class RealtimeClient {
     // Data channel for events
     this.dc = this.pc.createDataChannel('oai-events');
     this.dc.onopen = () => {
+      this.callbacks.onPhaseMark?.('dc_open');
       this.callbacks.onConnected();
     };
     this.dc.onmessage = (e) => this.handleServerEvent(e.data);
@@ -122,10 +185,11 @@ export class RealtimeClient {
     };
 
     // SDP exchange with OpenAI Realtime
+    this.callbacks.onPhaseMark?.('sdp_start');
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
 
-    const resp = await fetch(REALTIME_URL, {
+    const resp = await fetch(this.mint.webrtc_url || DEFAULT_REALTIME_URL, {
       method: 'POST',
       body: offer.sdp,
       headers: {
@@ -139,11 +203,21 @@ export class RealtimeClient {
     }
     const answerSdp = await resp.text();
     await this.pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+    this.callbacks.onPhaseMark?.('sdp_done');
   }
 
   /** Tell the model to start the conversation. */
   startConversation(): void {
     this.send({ type: 'response.create' });
+  }
+
+  /** Gate the mic track. Hybrid mode disables it while the live avatar speaks
+   *  through the kiosk speaker — otherwise the model hears its own lines as
+   *  "user speech" (echo cancellation doesn't cover a separate audio path)
+   *  and produces ghost turns. Track stays live (no renegotiation); disabled
+   *  tracks transmit silence. */
+  setMicEnabled(enabled: boolean): void {
+    this.localStream?.getAudioTracks().forEach((t) => { t.enabled = enabled; });
   }
 
   private handleServerEvent(raw: string): void {
@@ -165,7 +239,29 @@ export class RealtimeClient {
         break;
       case 'response.created':
         this.currentResponseHasAudio = false;
+        this.responseActive = true;
+        // The model is responding — nothing is stuck.
+        this.clearStallWatchdog();
+        this.stallRetries = 0;
         this.callbacks.onResponseStart();
+        break;
+      // GA WebRTC playback boundaries: the server tracks the audio it has
+      // streamed onto the RTP track. These are EXACT — unlike response.done,
+      // which fires while several seconds of audio are still buffered/playing.
+      case 'output_audio_buffer.started':
+        this.playbackEventsSeen = true;
+        this.currentResponseHasAudio = true;
+        this.callbacks.onSpeakingStart();
+        break;
+      case 'output_audio_buffer.stopped':
+        this.playbackEventsSeen = true;
+        this.callbacks.onSpeakingStop();
+        break;
+      case 'output_audio_buffer.cleared':
+        // Server dropped the remaining audio (barge-in / response.cancel).
+        this.playbackEventsSeen = true;
+        this.callbacks.onSpeakingStop();
+        this.callbacks.onBargeIn?.();
         break;
       case 'response.audio.delta':
       case 'response.output_audio.delta': // GA rename
@@ -186,9 +282,19 @@ export class RealtimeClient {
       case 'response.done': {
         const hadAudio = this.currentResponseHasAudio;
         this.currentResponseHasAudio = false;
+        this.responseActive = false;
+        // A tool result arrived while this response was still active — its
+        // response.create was deferred to here.
+        if (this.pendingResponseCreate) {
+          this.pendingResponseCreate = false;
+          this.responseActive = true; // optimistic again — watchdog covers it
+          this.send({ type: 'response.create' });
+          this.armStallWatchdog();
+        }
         // Tool-call-only responses produce no audio: clear phase immediately.
         // Audio-bearing responses delegate the stop to the page (it knows the
-        // accumulated transcript length and can estimate playback duration).
+        // accumulated transcript length and can estimate playback duration),
+        // or to output_audio_buffer.stopped when playback events are available.
         if (!hadAudio) {
           this.callbacks.onSpeakingStop();
         }
@@ -218,9 +324,25 @@ export class RealtimeClient {
           this.callbacks.onError(`tool error: ${e instanceof Error ? e.message : 'unknown'}`);
         });
         break;
-      case 'error':
-        this.callbacks.onError((evt.error as { message?: string })?.message || 'realtime error');
+      case 'error': {
+        const err = evt.error as { message?: string; code?: string } | undefined;
+        const msg = err?.message || 'realtime error';
+        // "conversation already has an active response" means our create was
+        // rejected because a real response is in flight. That one is benign and
+        // self-resolving: let response.done flush the deferred create. Anything
+        // else may have killed the turn, so reset and let the watchdog retry
+        // rather than leaving the patient in silence.
+        if (/active response/i.test(msg)) {
+          this.responseActive = true;
+          this.pendingResponseCreate = true;
+          this.armStallWatchdog();
+          break; // benign — don't surface it as an error to the patient
+        }
+        this.responseActive = false;
+        this.pendingResponseCreate = false;
+        this.callbacks.onError(msg);
         break;
+      }
       default:
         // ignore other events
         break;
@@ -256,8 +378,54 @@ export class RealtimeClient {
         output: JSON.stringify(result ?? {}),
       },
     });
-    // Ask model to continue speaking
-    this.send({ type: 'response.create' });
+    // Ask the model to continue speaking (or queue it if a response is still
+    // active, e.g. parallel tool calls in one response).
+    this.requestResponse();
+  }
+
+  /** Ask the model to speak, or queue that request if a response is active. */
+  private requestResponse(): void {
+    if (this.responseActive) {
+      this.pendingResponseCreate = true;
+    } else {
+      this.responseActive = true; // optimistic — see the watchdog
+      this.pendingResponseCreate = false;
+      this.send({ type: 'response.create' });
+    }
+    this.armStallWatchdog();
+  }
+
+  /** Recover if the model never starts speaking after we asked it to.
+   *
+   *  Fires only when something has gone wrong server-side; in the normal case
+   *  response.created arrives in a few hundred ms and disarms it. */
+  private armStallWatchdog(): void {
+    this.clearStallWatchdog();
+    this.stallTimer = setTimeout(() => {
+      this.stallTimer = null;
+      if (this.destroyed) return;
+      if (this.stallRetries >= MAX_STALL_RETRIES) {
+        this.callbacks.onError('the assistant stopped responding');
+        return;
+      }
+      this.stallRetries++;
+      // Whatever we believed about the response state was wrong — the model is
+      // not speaking and nothing is going to arrive to unblock us. Reset and
+      // ask once more.
+      this.responseActive = false;
+      this.pendingResponseCreate = false;
+      this.callbacks.onStall?.(this.stallRetries);
+      this.responseActive = true;
+      this.send({ type: 'response.create' });
+      this.armStallWatchdog();
+    }, RESPONSE_STALL_MS);
+  }
+
+  private clearStallWatchdog(): void {
+    if (this.stallTimer) {
+      clearTimeout(this.stallTimer);
+      this.stallTimer = null;
+    }
   }
 
   private send(payload: Record<string, unknown>): void {
@@ -268,6 +436,7 @@ export class RealtimeClient {
 
   destroy(): void {
     this.destroyed = true;
+    this.clearStallWatchdog();
     try {
       this.dc?.close();
     } catch { /* ignore */ }

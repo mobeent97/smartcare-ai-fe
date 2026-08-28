@@ -2,7 +2,6 @@ export interface TriageSession {
   id: string;
   status: 'IN_PROGRESS' | 'COMPLETED' | 'ROUTED';
   ctas_level: 1 | 2 | 3 | 4 | 5 | null;
-  akool_session_id: string | null;
   avatar_mode: 'NURSE' | 'DOCTOR';
   red_flags: string[] | null;
   reasoning_summary: string | null;
@@ -62,24 +61,6 @@ export interface AuditEvent {
   description: string;
   metadata: Record<string, unknown>;
   timestamp: string;
-}
-
-export interface AvatarSessionResponse {
-  // 'video' returns only provider+session_id; 'akool' returns agora_* creds;
-  // 'heygen' returns token+avatar_id+voice_id+quality.
-  provider?: 'video' | 'akool' | 'heygen';
-  session_id: string;
-  // akool (live streaming over Agora)
-  agora_app_id?: string;
-  agora_channel?: string;
-  agora_token?: string;
-  agora_uid?: number;
-  mode?: 'live' | 'mock';
-  // heygen (LiveKit streaming token)
-  token?: string;
-  avatar_id?: string;
-  voice_id?: string;
-  quality?: string;
 }
 
 export interface SubmitAnswerResponse {

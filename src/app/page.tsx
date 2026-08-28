@@ -145,7 +145,7 @@ const techStack = [
   { layer: 'Task Queue', tech: 'Celery + Redis' },
   { layer: 'Frontend', tech: 'Next.js 15' },
   { layer: 'LLM', tech: 'OpenAI GPT-4o-mini' },
-  { layer: 'Avatar', tech: 'AKOOL + Agora RTC' },
+  { layer: 'Voice', tech: 'OpenAI Realtime (speech-to-speech)' },
   { layer: 'Speech', tech: 'faster-whisper (local)' },
 ];
 
