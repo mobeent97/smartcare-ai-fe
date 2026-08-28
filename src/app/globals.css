@@ -222,3 +222,77 @@ html[data-transition='back']::view-transition-new(root) {
   animation: ctas1-glow 2s ease-in-out infinite;
   border-color: rgba(220, 38, 38, 0.6) !important;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* MOBILE / STANDALONE (iOS home-screen pin)                               */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Named so components read intent rather than repeating env() everywhere.
+     These resolve to 0 on desktop, so the same rules are safe there. */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+html {
+  /* iOS enlarges text in landscape unless told not to, which breaks fixed
+     layouts like the booth header. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  /* Kill the grey flash on tap — it reads as a rendering bug on a kiosk. */
+  -webkit-tap-highlight-color: transparent;
+  /* Stop rubber-band scroll revealing the page background behind the app. */
+  overscroll-behavior-y: none;
+}
+
+/* Full height that accounts for the iOS URL bar.
+   100vh on iOS Safari is the LARGEST viewport (bar hidden), so a 100vh element
+   is taller than the visible area and the bottom is cut off. 100dvh tracks the
+   actual visible height. Fallback first for browsers without dvh. */
+.min-h-screen { min-height: 100vh; }
+@supports (min-height: 100dvh) {
+  .min-h-screen { min-height: 100dvh; }
+}
+.h-screen { height: 100vh; }
+@supports (height: 100dvh) {
+  .h-screen { height: 100dvh; }
+}
+
+/* Opt-in helpers for elements pinned to a screen edge. */
+.safe-top    { padding-top: var(--safe-top); }
+.safe-bottom { padding-bottom: var(--safe-bottom); }
+.safe-x      { padding-left: var(--safe-left); padding-right: var(--safe-right); }
+
+/* The booth is a single-purpose patient screen: no text selection, no callout
+   menus on long-press. The dashboard is deliberately excluded — staff need to
+   copy case IDs and readings. */
+.booth-kiosk {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.booth-kiosk input,
+.booth-kiosk textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* iOS zooms the page when focusing an input under 16px. Enforce the floor so
+   the layout never jumps mid-triage. */
+@media (max-width: 820px) {
+  input, textarea, select, button {
+    font-size: max(16px, 1em);
+  }
+}
+
+/* Any wide block (tables, code, diagrams) scrolls inside itself rather than
+   pushing the page sideways. */
+.scroll-x {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}

@@ -32,12 +32,20 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
   return (
     <header
       style={{
-        height: '64px',
+        minHeight: '64px',
         background: 'rgb(5, 20, 20)',
         borderBottom: '1px solid rgb(11, 40, 39)',
         display: 'flex',
         alignItems: 'center',
-        padding: '0px 24px',
+        // Wrap rather than overflow: on a phone the nav links would otherwise
+        // push the role badge and avatar off the right edge.
+        flexWrap: 'wrap',
+        rowGap: '6px',
+        padding: '6px 16px',
+        // Standalone iOS overlays the status bar on the page.
+        paddingTop: 'calc(6px + var(--safe-top))',
+        paddingLeft: 'max(16px, var(--safe-left))',
+        paddingRight: 'max(16px, var(--safe-right))',
         gap: '8px',
         flexShrink: 0,
       }}
