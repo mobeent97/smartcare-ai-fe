@@ -1,6 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
+import type { AnswerExtras } from '@/lib/openai-realtime';
 import type {
-  ApiResponse, TriageSession, AvatarSessionResponse,
+  ApiResponse, TriageSession,
   SubmitAnswerResponse, DeviceMeasurement, AuthTokens, DashboardMetrics,
   AdminUser, MetricsTimeseries,
 } from '@/types/api';
@@ -85,39 +86,6 @@ class ApiClient {
     return res.data;
   }
 
-  async createAvatarSession(sessionId: string, avatarType: 'nurse' | 'doctor' = 'nurse') {
-    const res = await this.client.post<ApiResponse<AvatarSessionResponse>>('/triage/avatar/session/', {
-      session_id: sessionId,
-      avatar_type: avatarType,
-    });
-    return res.data;
-  }
-
-  async ttsSpeak(text: string): Promise<Blob> {
-    const res = await this.client.post('/triage/avatar/speak/', { text }, { responseType: 'blob' });
-    return res.data as Blob;
-  }
-
-  async sendAvatarMessage(akoolSessionId: string, text: string, sessionId: string) {
-    const res = await this.client.post('/triage/avatar/speak/', { akool_session_id: akoolSessionId, text, session_id: sessionId });
-    return res.data;
-  }
-
-  async closeAvatarSession(akoolSessionId: string, sessionId: string) {
-    const res = await this.client.post('/triage/avatar/session/close/', {
-      akool_session_id: akoolSessionId,
-      session_id: sessionId,
-    });
-    return res.data;
-  }
-
-  async getAvatarSessionStatus(akoolSessionId: string) {
-    const res = await this.client.get<ApiResponse<unknown>>('/triage/avatar/session/status/', {
-      params: { akool_session_id: akoolSessionId },
-    });
-    return res.data;
-  }
-
   async getSessionResults(sessionId: string) {
     const res = await this.client.get<ApiResponse<TriageSession>>(
       `/triage/sessions/${sessionId}/results/`
@@ -147,18 +115,30 @@ class ApiClient {
     return res.data;
   }
 
-  async submitAnswer(sessionId: string, step: string, value: string, mode?: 'realtime') {
+  async submitAnswer(
+    sessionId: string,
+    step: string,
+    value: string,
+    mode?: 'realtime',
+    extras?: AnswerExtras,
+  ) {
     const res = await this.client.post<ApiResponse<SubmitAnswerResponse>>(
       `/triage/sessions/${sessionId}/answer/`,
-      { step, value, ...(mode ? { mode } : {}) }
+      { step, value, ...(mode ? { mode } : {}), ...(extras ?? {}) }
     );
     return res.data;
   }
 
-  async updateAnswer(sessionId: string, step: string, value: string) {
+  async updateAnswer(
+    sessionId: string,
+    step: string,
+    value: string,
+    mode?: 'realtime',
+    extras?: AnswerExtras,
+  ) {
     const res = await this.client.post<ApiResponse<{ ok: boolean; step: string; guidance: string }>>(
       `/triage/sessions/${sessionId}/answer/update/`,
-      { step, value }
+      { step, value, ...(mode ? { mode } : {}), ...(extras ?? {}) }
     );
     return res.data;
   }
@@ -167,13 +147,6 @@ class ApiClient {
    *  browser handles the file save dialog natively. */
   getSessionPdfUrl(sessionId: string): string {
     return `${BASE_URL}/triage/sessions/${sessionId}/export/pdf/`;
-  }
-
-  /** Absolute URL for the avatar-session close endpoint — used with
-   *  navigator.sendBeacon on page unload so a live (AKOOL) streaming session
-   *  is torn down even if the patient closes the tab. */
-  getAvatarCloseUrl(): string {
-    return `${BASE_URL}/triage/avatar/session/close/`;
   }
 
   async markUnableToAssess(sessionId: string, reason: string) {

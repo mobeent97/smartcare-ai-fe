@@ -4,13 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import { RealtimeClient, type ToolDispatcher } from '@/lib/openai-realtime';
-import {
-  createAvatarManager,
-  getConfiguredProvider,
-  type AvatarManager,
-  type AvatarVisualState,
-} from '@/lib/avatar-manager';
 import { streamLog } from '@/lib/stream-log';
+import { LatencyTracker } from '@/lib/turn-latency';
+import { takePrefetchedMint } from '@/lib/realtime-prewarm';
 
 type Phase = 'connecting' | 'listening' | 'thinking' | 'speaking' | 'error';
 
@@ -31,7 +27,6 @@ const FLOW_STEPS: { id: string; label: string }[] = [
 ];
 
 interface TurnTiming {
-  userTranscriptAt: number | null;
   speakStartAt: number | null;
 }
 
@@ -41,18 +36,10 @@ export default function RealtimeBoothPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
   const debugEnabled = searchParams.get('debug') === '1';
 
-  // HYBRID mode: when a live avatar provider (akool/heygen) is configured, the
-  // OpenAI Realtime model is used only as the BRAIN — mic VAD + transcript text
-  // + tool calls. Its spoken audio is muted, and each completed assistant text
-  // is spoken by the live avatar so the face actually lipsyncs. With provider
-  // 'video' we keep the original behaviour: OpenAI voice + mp4 loops.
-  // VOICE_ONLY ('none'): no face at all. The Realtime model's own audio plays
-  // straight out of the audio element — no second vendor doing TTS, so nothing
-  // to keep in sync and no stream-open wait. Lowest-latency configuration we
-  // have. The screen shows a voice orb + captions instead of the mp4 loops.
-  const provider = getConfiguredProvider();
-  const VOICE_ONLY = provider === 'none';
-  const HYBRID = provider !== 'video' && !VOICE_ONLY;
+  // The booth is voice-only: the Realtime model's own audio plays straight out
+  // of the audio element, with a phase-driven orb + captions on screen. There
+  // is no avatar vendor in the path, so there is no second TTS clock to keep in
+  // sync and nothing to wait on before the first word.
 
   const [phase, setPhase] = useState<Phase>('connecting');
   const [errorMsg, setErrorMsg] = useState('');
@@ -67,25 +54,14 @@ export default function RealtimeBoothPage() {
   // Debug / telemetry
   const [debugEvents, setDebugEvents] = useState<DebugEvent[]>([]);
   const [turnLatencies, setTurnLatencies] = useState<number[]>([]);
-  const turnTimingRef = useRef<TurnTiming>({ userTranscriptAt: null, speakStartAt: null });
+  const turnTimingRef = useRef<TurnTiming>({ speakStartAt: null });
+  const latencyRef = useRef<LatencyTracker | null>(null);
   const toolCallCountRef = useRef<Record<string, number>>({});
 
   const clientRef = useRef<RealtimeClient | null>(null);
   const audioContainerRef = useRef<HTMLDivElement>(null);
   const assistantBufRef = useRef('');
-  // Sentence-streaming state (hybrid): how much of assistantBufRef has been
-  // flushed to the avatar, how many chunks are queued/speaking, and whether
-  // this model turn produced any speech at all (tool-call-only turns don't).
-  const flushedLenRef = useRef(0);
-  const inFlightSpeaksRef = useRef(0);
-  const turnHadSpeechRef = useRef(false);
 
-  // Live-avatar (hybrid) wiring
-  const [avatarState, setAvatarState] = useState<AvatarVisualState>('idle');
-  const [avatarOpened, setAvatarOpened] = useState(false); // true once the live stream has rendered a frame
-  const avatarVideoRef = useRef<HTMLVideoElement>(null);
-  const avatarMgrRef = useRef<AvatarManager | null>(null);
-  const triageDoneRef = useRef(false); // gate avatar reopen once triage is COMPLETED (create 403s on a non-IN_PROGRESS session)
   const speakStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioStartedAtRef = useRef<number>(0);
   // After complete_triage we must wait for the avatar to FINISH the closing
@@ -93,6 +69,7 @@ export default function RealtimeBoothPage() {
   // mid-speech. Set pending=true; each finished speech (re)arms a short
   // debounce, so the last spoken line wins. Hard fallback guards a stuck stream.
   const redirectPendingRef = useRef(false);
+  const triageDoneRef = useRef(false); // read by the disconnect stream log
   const redirectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const pushDebug = (label: string, detail?: string) => {
@@ -144,43 +121,17 @@ export default function RealtimeBoothPage() {
       }, delayMs);
     };
 
-    // Hybrid sentence-streaming: hand one sentence at a time to the live
-    // avatar AS the model generates, instead of waiting for the full response.
-    // The avatar starts speaking sentence 1 while the model is still writing
-    // sentence 3 — this overlap is the single biggest dead-air cut. The mic is
-    // gated off from the first chunk until the last finishes so the model
-    // doesn't hear the kiosk speaker as user speech.
-    const dispatchAvatarChunk = (text: string) => {
-      const chunk = text.trim();
-      if (!chunk || !avatarMgrRef.current) return;
-      turnHadSpeechRef.current = true;
-      if (inFlightSpeaksRef.current === 0) clientRef.current?.setMicEnabled(false);
-      inFlightSpeaksRef.current++;
-      setPhase('speaking');
-      pushDebug('avatar_chunk', `words=${chunk.split(/\s+/).length} inflight=${inFlightSpeaksRef.current}`);
-      avatarMgrRef.current.speak(chunk)
-        .catch(() => {})
-        .then(() => {
-          if (cancelled) return;
-          inFlightSpeaksRef.current = Math.max(0, inFlightSpeaksRef.current - 1);
-          if (inFlightSpeaksRef.current === 0) {
-            clientRef.current?.setMicEnabled(true);
-            setPhase((p) => (p === 'speaking' ? 'listening' : p));
-            // Last chunk actually finished (AKOOL audio_end) — re-arm the
-            // (debounced) results redirect if triage is wrapping up.
-            if (redirectPendingRef.current) armRedirect(1200);
-          }
-        });
-    };
-
     const tools: ToolDispatcher = {
-      submit_answer: async ({ step, value }) => {
+      submit_answer: async ({ step, value, ...extras }) => {
         const key = `submit_answer:${step}`;
         const block = overBudget(key, PER_TOOL_LIMIT.submit_answer);
         if (block) return { ok: false, error: block, guidance: block };
         trackToolCall(key);
         try {
-          const res = await api.submitAnswer(sessionId, step, value, 'realtime');
+          // `extras` carries whatever the model already extracted (symptoms,
+          // demographics). Passing it through means the server never has to run
+          // an LLM parse while the model sits blocked on this response.
+          const res = await api.submitAnswer(sessionId, step, value, 'realtime', extras);
           const d = res.data;
           setCompletedSteps((prev) => {
             if (prev.has(step)) return prev;
@@ -190,8 +141,7 @@ export default function RealtimeBoothPage() {
           });
           // NOTE: in realtime, vitals are taken AFTER the last question, so the
           // session stays IN_PROGRESS until complete_triage. Do NOT mark triage
-          // done here — that happens in complete_triage. Marking it now would
-          // block the avatar reopen during the vitals steps.
+          // done here — that happens in complete_triage.
           return {
             ok: true,
             next_step: d.next_step,
@@ -204,21 +154,19 @@ export default function RealtimeBoothPage() {
                 : 'Continue the conversation naturally.',
           };
         } catch (e) {
-          const msg = e instanceof Error ? e.message : 'submit_answer failed';
-          return { ok: false, error: msg, guidance: 'Apologize briefly and try a different question.' };
+          return toolError(e, 'Apologize briefly and try a different question.');
         }
       },
-      update_answer: async ({ step, value }) => {
+      update_answer: async ({ step, value, ...extras }) => {
         const key = `update_answer:${step}`;
         const block = overBudget(key, PER_TOOL_LIMIT.submit_answer);
         if (block) return { ok: false, error: block, guidance: block };
         trackToolCall(key);
         try {
-          const res = await api.updateAnswer(sessionId, step, value);
+          const res = await api.updateAnswer(sessionId, step, value, 'realtime', extras);
           return res.data; // { ok, step, guidance }
         } catch (e) {
-          const msg = e instanceof Error ? e.message : 'update_answer failed';
-          return { ok: false, error: msg, guidance: 'Briefly acknowledge and continue.' };
+          return toolError(e, 'Briefly acknowledge and continue.');
         }
       },
       trigger_measurement: async ({ device_type }) => {
@@ -254,8 +202,7 @@ export default function RealtimeBoothPage() {
           guidance: 'Briefly verbalize this reading to the patient and continue to the next step.',
         };
         } catch (e) {
-          const msg = e instanceof Error ? e.message : 'measurement failed';
-          return { ok: false, error: msg, guidance: 'Apologize, skip this reading, and continue.' };
+          return toolError(e, 'Apologize, skip this reading, and continue.');
         }
       },
       flag_emergency: async ({ reason }) => {
@@ -272,8 +219,7 @@ export default function RealtimeBoothPage() {
             guidance: 'Emergency alert sent to staff. Tell the patient calmly that help is coming and to stay still. Do NOT call any further tools.',
           };
         } catch (e) {
-          const msg = e instanceof Error ? e.message : 'flag_emergency failed';
-          return { ok: false, error: msg, guidance: 'Tell the patient calmly that help is coming. Do not retry.' };
+          return toolError(e, 'Tell the patient calmly that help is coming. Do not retry.');
         }
       },
       complete_triage: async () => {
@@ -281,14 +227,12 @@ export default function RealtimeBoothPage() {
         if (block) return { ok: false, error: block, guidance: block };
         trackToolCall('complete_triage');
         try {
+          // Only mark triage done once the server has actually scored it — it
+          // can refuse (missing required steps), and a premature flag would
+          // leave the booth showing a completed triage that never happened.
+          const res = await api.completeTriage(sessionId);
           setTriageDone(true);
           triageDoneRef.current = true;
-          // Triage is done → the session leaves IN_PROGRESS, so minting a new
-          // avatar session would 403. Stop reopening but KEEP the live stream so
-          // it can speak the closing wait-time line; it's torn down on redirect/
-          // unmount below.
-          avatarMgrRef.current?.preventReopen?.();
-          const res = await api.completeTriage(sessionId);
           const ctas = res.data.ctas_level;
           const specialty = res.data.routing_specialty;
           const ctasMessage: Record<number, string> = {
@@ -311,8 +255,7 @@ export default function RealtimeBoothPage() {
             guidance: 'Briefly tell the patient their wait time and where they will be seen. Then thank them and stop calling tools.',
           };
         } catch (e) {
-          const msg = e instanceof Error ? e.message : 'complete_triage failed';
-          return { ok: false, error: msg, guidance: 'Apologize and tell the patient a clinician will be with them soon.' };
+          return toolError(e, 'Apologize and tell the patient a clinician will be with them soon.');
         }
       },
     };
@@ -327,8 +270,16 @@ export default function RealtimeBoothPage() {
       // and trips the per-IP throttle.
       if (mintInFlight) return;
       mintInFlight = true;
+      const latency = (latencyRef.current ??= new LatencyTracker(sessionId));
       try {
-        const mint = await api.createRealtimeSession(sessionId);
+        latency.coldMark('mint_start');
+        // The consent page starts this round trip on "I agree", so by the time
+        // we get here it is usually already done. Falls back to minting inline
+        // whenever the prefetch is missing, stale, or failed.
+        const prefetched = await takePrefetchedMint(sessionId);
+        if (prefetched) pushDebug('mint_prefetched');
+        const mint = prefetched ?? (await api.createRealtimeSession(sessionId));
+        latency.coldMark('mint_done');
         if (cancelled) return;
 
         const client = new RealtimeClient(
@@ -338,24 +289,8 @@ export default function RealtimeBoothPage() {
               if (cancelled) return;
               reconnectAttempts = 0;            // healthy connection resets budget
               pushDebug('connected');
-              // Hybrid: hold the model's first utterance until the AKOOL stream is
-              // actually live. Otherwise OpenAI greets (and may run ahead) while
-              // the avatar is still connecting — speech queues and replays out of
-              // sync once the stream publishes.
-              if (HYBRID && avatarMgrRef.current?.ensureReady) {
-                setPhase('connecting');
-                avatarMgrRef.current.ensureReady()
-                  .catch(() => {})
-                  .then(() => {
-                    if (cancelled) return;
-                    setPhase('listening');
-                    client.startConversation();
-                    pushDebug('avatar_ready_started');
-                  });
-              } else {
-                setPhase('listening');
-                client.startConversation();
-              }
+              setPhase('listening');
+              client.startConversation();
             },
             onDisconnected: (reason) => {
               if (cancelled) return;
@@ -379,61 +314,33 @@ export default function RealtimeBoothPage() {
             },
             onUserTranscript: (text, isFinal) => {
               if (cancelled || !isFinal) return;
-              turnTimingRef.current.userTranscriptAt = Date.now();
               setUserTranscript(text);
               pushDebug('user_transcript', text.slice(0, 80));
             },
             onAssistantTranscript: (delta) => {
               if (cancelled) return;
               assistantBufRef.current += delta;
-              // Non-hybrid (video provider, OpenAI voice): subtitle tracks OpenAI
-              // text. Hybrid: AKOOL's onSubtitle owns the subtitle so it stays in
-              // sync with the avatar's actual speech.
-              if (!HYBRID) {
-                setAssistantSubtitle(assistantBufRef.current);
-                return;
-              }
-              // Sentence-streaming: flush each completed sentence to the avatar
-              // as it lands. Boundary = . ! ? … followed by whitespace/end (the
-              // lookahead keeps decimals like "37.5" intact); the 25-char floor
-              // keeps abbreviations ("Dr.") and tiny fragments buffered until a
-              // real sentence completes. Last qualifying boundary wins, so a
-              // burst of deltas flushes as one chunk.
-              const unflushed = assistantBufRef.current.slice(flushedLenRef.current);
-              const MIN_CHUNK = 25;
-              let cut = -1;
-              for (const m of unflushed.matchAll(/[.!?…](?=\s|$)/g)) {
-                if (m.index !== undefined && m.index + 1 >= MIN_CHUNK) cut = m.index + 1;
-              }
-              if (cut > 0) {
-                const chunk = unflushed.slice(0, cut);
-                flushedLenRef.current += cut;
-                dispatchAvatarChunk(chunk);
-              }
+              // The model's own audio is what the patient hears, so the subtitle
+              // can track its text directly.
+              setAssistantSubtitle(assistantBufRef.current);
             },
             onResponseStart: () => {
               if (cancelled) return;
               // New model response begins — reset the text buffer for this turn.
               assistantBufRef.current = '';
-              flushedLenRef.current = 0;
-              turnHadSpeechRef.current = false;
-              // Non-hybrid clears the subtitle here; hybrid lets AKOOL's onSubtitle
-              // own it (clears at the avatar's real speech end) so it doesn't blank
-              // while the avatar is still speaking the previous line.
-              if (!HYBRID) setAssistantSubtitle('');
+              setAssistantSubtitle('');
               setAssistantTurnId((n) => n + 1);
               audioStartedAtRef.current = 0;
               if (speakStopTimerRef.current) {
                 clearTimeout(speakStopTimerRef.current);
                 speakStopTimerRef.current = null;
               }
+              latency.responseStart();
               pushDebug('response_start');
             },
             onSpeakingStart: () => {
               if (cancelled) return;
-              // Hybrid: OpenAI audio is muted; the live avatar owns the speaking
-              // phase (set when we dispatch its speak() in onResponseComplete).
-              if (HYBRID) return;
+              latency.firstAudio();
               // Fires per transcript delta — record true audio start once per turn.
               const t = turnTimingRef.current;
               if (t.speakStartAt) {
@@ -441,12 +348,6 @@ export default function RealtimeBoothPage() {
                 return;
               }
               const now = Date.now();
-              if (t.userTranscriptAt) {
-                const latency = now - t.userTranscriptAt;
-                setTurnLatencies((prev) => [...prev.slice(-9), latency]);
-                pushDebug('turn_latency_ms', String(latency));
-                t.userTranscriptAt = null;
-              }
               t.speakStartAt = now;
               audioStartedAtRef.current = now;
               setPhase('speaking');
@@ -454,7 +355,6 @@ export default function RealtimeBoothPage() {
             },
             onSpeakingStop: () => {
               if (cancelled) return;
-              if (HYBRID) return; // avatar speak()-promise drives the phase back to listening
               // Reset turn-start guard so next response measures latency fresh.
               turnTimingRef.current.speakStartAt = null;
               if (speakStopTimerRef.current) {
@@ -466,24 +366,13 @@ export default function RealtimeBoothPage() {
             },
             onResponseComplete: (hadAudio: boolean) => {
               if (cancelled) return;
-              // Hybrid: sentences were already streamed to the avatar as they
-              // were generated (onAssistantTranscript). Flush whatever trails
-              // the last sentence boundary, then handle the speechless case.
-              // After triage completes the avatar is in no-reopen mode: speak()
-              // plays on the still-live stream (closing line) and silently
-              // no-ops if the stream already closed — so it never 403s, and the
-              // chunk accounting still drives the phase back to listening.
-              if (HYBRID) {
-                const remainder = assistantBufRef.current.slice(flushedLenRef.current).trim();
-                flushedLenRef.current = assistantBufRef.current.length;
-                if (remainder) dispatchAvatarChunk(remainder);
-                // Tool-call-only / speechless closing turn → don't hold the
-                // redirect waiting on avatar speech that will never come.
-                if (!turnHadSpeechRef.current && redirectPendingRef.current
-                    && inFlightSpeaksRef.current === 0) {
-                  armRedirect(1500);
-                }
-                return;
+              const turn = latency.flushTurn();
+              if (turn?.totalMs != null) {
+                setTurnLatencies((prev) => [...prev.slice(-9), turn.totalMs as number]);
+                pushDebug(
+                  'turn_latency_ms',
+                  `total=${turn.totalMs} think=${turn.thinkMs ?? '-'} tools=${turn.toolMs}`,
+                );
               }
               if (!hadAudio || !audioStartedAtRef.current) return;
               // GA WebRTC emits output_audio_buffer.stopped at the EXACT end of
@@ -524,7 +413,7 @@ export default function RealtimeBoothPage() {
               }
               turnTimingRef.current.speakStartAt = null;
               audioStartedAtRef.current = 0;
-              if (!HYBRID) setPhase((p) => (p === 'speaking' ? 'listening' : p));
+              setPhase((p) => (p === 'speaking' ? 'listening' : p));
               pushDebug('barge_in');
             },
             onUserSpeechStart: () => {
@@ -538,23 +427,25 @@ export default function RealtimeBoothPage() {
             },
             onUserSpeechStop: () => {
               if (cancelled) return;
+              latency.speechStop();
               setPhase((p) => (p === 'speaking' ? p : 'thinking'));
-              // Hybrid: the patient finished a turn → the model is about to
-              // respond. Warm the AKOOL stream NOW (no-op if already open) so a
-              // reconnect after an idle-close overlaps with the model's thinking
-              // instead of adding its ~2-3s join to the visible gap.
-              if (HYBRID && !triageDoneRef.current) avatarMgrRef.current?.ensureOpen().catch(() => {});
               pushDebug('user_speech_stopped');
+            },
+            onStall: (attempt) => {
+              if (cancelled) return;
+              // The model went quiet when it owed us a reply and the client is
+              // re-prompting it. Logged rather than shown — the patient should
+              // just hear the nurse resume.
+              pushDebug('stall_recovery', `attempt=${attempt}`);
+              streamLog(sessionId, 'STALL_RECOVERY', { attempt });
             },
             onError: (msg) => {
               if (cancelled) return;
               setErrorMsg(msg);
               pushDebug('error', msg);
             },
+            onPhaseMark: (mark) => latency.coldMark(mark as Parameters<LatencyTracker['coldMark']>[0]),
             onAudioElement: (el) => {
-              // Hybrid: silence the OpenAI voice — the live avatar speaks instead.
-              // The MediaStream still feeds the waveform analyser even when muted.
-              if (HYBRID) { el.muted = true; el.volume = 0; }
               if (audioContainerRef.current) {
                 audioContainerRef.current.innerHTML = '';
                 audioContainerRef.current.appendChild(el);
@@ -562,7 +453,7 @@ export default function RealtimeBoothPage() {
               setAudioEl(el);
             },
           },
-          tools,
+          instrumentTools(tools, latency),
         );
         clientRef.current = client;
         await client.connect();
@@ -587,36 +478,6 @@ export default function RealtimeBoothPage() {
       }
     };
 
-    // Build the live avatar (lazy — the AKOOL/HeyGen stream only opens on the
-    // first speak() below, so nothing bills during connect). State changes drive
-    // the on-screen video; the OpenAI brain feeds it text in onResponseComplete.
-    if (HYBRID) {
-      createAvatarManager(provider, {
-        sessionId,
-        avatarType: 'nurse',
-        getVideoElement: () => avatarVideoRef.current,
-        onStateChange: (s) => {
-          if (cancelled) return;
-          setAvatarState(s);
-          if (s === 'speaking') setAvatarOpened(true);
-        },
-        // Drive the on-screen subtitle off AKOOL's REAL speech (word-by-word
-        // during audio_start→audio_end), NOT OpenAI's generation — otherwise
-        // the text races ahead of the avatar's voice while the stream loads.
-        onSubtitle: (text) => { if (!cancelled) setAssistantSubtitle(text); },
-        // Live session ended (duration cap / drop). Hide the live <video> and
-        // show the connecting placeholder again; the next speak() reopens.
-        onStreamClosed: () => {
-          if (cancelled) return;
-          setAvatarOpened(false);
-          pushDebug('avatar_stream_closed');
-        },
-        onError: () => { if (!cancelled) pushDebug('avatar_error'); },
-      })
-        .then((m) => { if (cancelled) { m.destroy().catch(() => {}); return; } avatarMgrRef.current = m; })
-        .catch(() => {});
-    }
-
     connectClient();
 
     return () => {
@@ -631,42 +492,10 @@ export default function RealtimeBoothPage() {
       }
       clientRef.current?.destroy();
       clientRef.current = null;
-      avatarMgrRef.current?.destroy().catch(() => {});
-      avatarMgrRef.current = null;
     };
   }, [sessionId, router]);
 
-  // Beacon-close the billed live avatar session if the patient closes the tab
-  // mid-conversation, so idle minutes don't bleed.
-  useEffect(() => {
-    if (!HYBRID) return;
-    const onHide = () => {
-      if (document.visibilityState !== 'hidden') return;
-      const payload = avatarMgrRef.current?.beaconClosePayload();
-      if (!payload) return;
-      try {
-        navigator.sendBeacon(
-          api.getAvatarCloseUrl(),
-          new Blob([JSON.stringify(payload)], { type: 'application/json' }),
-        );
-      } catch { /* best-effort */ }
-    };
-    document.addEventListener('visibilitychange', onHide);
-    window.addEventListener('pagehide', onHide);
-    return () => {
-      document.removeEventListener('visibilitychange', onHide);
-      window.removeEventListener('pagehide', onHide);
-    };
-  }, [HYBRID]);
-
   const isSpeaking = phase === 'speaking';
-  // Map conversation phase to one of the three pre-recorded loops (video
-  // provider). In hybrid the live avatar reports its own visual state.
-  const videoState: 'idle' | 'speaking' | 'listening' = HYBRID
-    ? avatarState
-    : phase === 'speaking' ? 'speaking'
-      : phase === 'listening' ? 'listening'
-        : 'idle';
   const phaseLabel = phase === 'speaking'
     ? 'Nurse AI Speaking'
     : phase === 'listening'
@@ -816,81 +645,7 @@ export default function RealtimeBoothPage() {
               position: 'relative',
               animation: 'orb-glow 3s ease-in-out infinite',
             }}>
-              {HYBRID ? (
-                <>
-                  {/* Connecting placeholder — NO local video in live-avatar mode.
-                      Shows until the AKOOL stream renders its first frame, and
-                      again if the session reopens mid-flow. */}
-                  <div
-                    style={{
-                      position: 'absolute', inset: 0,
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                      gap: 14,
-                      background: 'radial-gradient(circle at 50% 40%, rgba(9,246,238,0.06), var(--color-dash-card))',
-                      opacity: avatarOpened ? 0 : 1,
-                      transition: 'opacity 0.4s ease',
-                      pointerEvents: 'none',
-                    }}
-                  >
-                    <div style={{
-                      width: 46, height: 46, borderRadius: '50%',
-                      border: '3px solid rgba(9,246,238,0.18)',
-                      borderTopColor: '#09f6ee',
-                      animation: 'spin 0.9s linear infinite',
-                    }} />
-                    <span style={{ color: 'rgba(134,223,220,0.7)', fontSize: 12, fontWeight: 600, letterSpacing: '0.04em' }}>
-                      Connecting to Nurse AI…
-                    </span>
-                  </div>
-                  {/* Live AKOOL/HeyGen avatar — Agora attaches the remote stream here.
-                      Muted: the avatar's voice plays via its own Agora audio track. */}
-                  <video
-                    ref={avatarVideoRef}
-                    autoPlay playsInline muted
-                    style={{
-                      width: '100%', height: '100%', objectFit: 'cover',
-                      position: 'absolute', inset: 0,
-                      opacity: avatarOpened ? 1 : 0,
-                      transition: 'opacity 0.4s ease',
-                    }}
-                  />
-                </>
-              ) : VOICE_ONLY ? (
-                <VoiceOrb phase={phase} />
-              ) : (
-                <>
-                  <video
-                    src="/avatar/idle.mp4"
-                    autoPlay loop muted playsInline
-                    style={{
-                      width: '100%', height: '100%', objectFit: 'cover',
-                      position: 'absolute', inset: 0,
-                      opacity: videoState === 'idle' ? 1 : 0,
-                      transition: 'opacity 0.25s ease',
-                    }}
-                  />
-                  <video
-                    src="/avatar/speaking.mp4"
-                    autoPlay loop muted playsInline
-                    style={{
-                      width: '100%', height: '100%', objectFit: 'cover',
-                      position: 'absolute', inset: 0,
-                      opacity: videoState === 'speaking' ? 1 : 0,
-                      transition: 'opacity 0.25s ease',
-                    }}
-                  />
-                  <video
-                    src="/avatar/listening.mp4"
-                    autoPlay loop muted playsInline
-                    style={{
-                      width: '100%', height: '100%', objectFit: 'cover',
-                      position: 'absolute', inset: 0,
-                      opacity: videoState === 'listening' ? 1 : 0,
-                      transition: 'opacity 0.25s ease',
-                    }}
-                  />
-                </>
-              )}
+              <VoiceOrb phase={phase} />
 
               {/* Live badge */}
               <div style={{
@@ -1216,6 +971,43 @@ function ProgressStrip({ completed, done }: { completed: Set<string>; done: bool
       </span>
     </div>
   );
+}
+
+// ─── Server-rejection guidance ─────────────────────────────────────────────
+// The backend enforces the rules that must actually hold (step validity, repeat
+// caps, scoring preconditions) and returns a `guidance` string the model can act
+// on. Without this the model only sees "Request failed with status code 403" and
+// retries blindly until it burns its budget.
+function toolError(e: unknown, fallback: string): { ok: false; error: string; guidance: string } {
+  const resp = (e as { response?: { data?: { data?: Record<string, unknown> } } })?.response;
+  const payload = resp?.data?.data;
+  const guidance = typeof payload?.guidance === 'string' ? payload.guidance : fallback;
+  const error =
+    typeof payload?.error === 'string'
+      ? payload.error
+      : e instanceof Error
+        ? e.message
+        : 'tool call failed';
+  return { ok: false, error, guidance };
+}
+
+// ─── Tool-call instrumentation ─────────────────────────────────────────────
+// Wraps the dispatcher so every tool round trip is timed without any of the
+// handlers having to know about the tracker. The model is blocked on these
+// calls, so their duration is dead air the patient hears as silence.
+function instrumentTools(tools: ToolDispatcher, latency: LatencyTracker): ToolDispatcher {
+  const wrapped = {} as Record<string, (args: never) => Promise<unknown>>;
+  for (const [name, fn] of Object.entries(tools)) {
+    wrapped[name] = async (args: never) => {
+      latency.toolStart(name);
+      try {
+        return await (fn as (a: never) => Promise<unknown>)(args);
+      } finally {
+        latency.toolEnd(name);
+      }
+    };
+  }
+  return wrapped as unknown as ToolDispatcher;
 }
 
 // ─── Voice-only orb ────────────────────────────────────────────────────────

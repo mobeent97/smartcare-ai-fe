@@ -2,9 +2,8 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
-import { prefetchTts, prewarmAudio } from '@/lib/video-avatar';
-import { getConfiguredProvider } from '@/lib/avatar-manager';
 import { api } from '@/lib/api';
+import { prewarmMic, prefetchMint } from '@/lib/realtime-prewarm';
 import { useBoothStore } from '@/store/booth';
 
 // All audio prefetched in parallel while user reads consent
@@ -47,21 +46,17 @@ export default function ConsentPage() {
   const [audioReady, setAudioReady] = useState(false);
   const [agreed, setAgreed] = useState(false);
 
-  // Fire prefetch immediately on mount — runs while user reads consent.
-  // Realtime flow uses OpenAI Realtime API for voice; skip AKOOL TTS prefetch.
+  // Get the microphone permission dialog out of the way while the patient is
+  // reading, not while the nurse is trying to greet them. Sends nothing — the
+  // grant just makes the later getUserMedia in connect() prompt-free.
   useEffect(() => {
-    // OpenAI-TTS prefetch only helps the 'video' provider. Realtime, AKOOL and
-    // HeyGen all use their own built-in TTS, so prefetching here is wasted.
-    if (process.env.NEXT_PUBLIC_USE_REALTIME === 'true' || getConfiguredProvider() !== 'video') {
-      setAudioReady(true);
-      return;
-    }
-    prefetchTts(ALL_TTS_TEXTS).then(() => setAudioReady(true));
+    let alive = true;
+    prewarmMic().finally(() => { if (alive) setAudioReady(true); });
+    return () => { alive = false; };
   }, []);
 
   async function handleAgree() {
     setAgreed(true);
-    prewarmAudio();
     // Await consent recording — the layout guard reads consent_given_at on the
     // next page; if we navigate before the backend persists it, the guard will
     // bounce the patient straight back here in a redirect loop.
@@ -74,8 +69,11 @@ export default function ConsentPage() {
       router.push(`/booth/${sessionId}/manual`);
       return;
     }
-    const useRealtime = process.env.NEXT_PUBLIC_USE_REALTIME === 'true';
-    router.push(`/booth/${sessionId}/${useRealtime ? 'realtime' : 'avatar'}`);
+    // Start the ephemeral-key round trip now, so it overlaps the navigation and
+    // the realtime page's first render instead of running after them. Only ever
+    // after consent is recorded — minting builds instructions from the session.
+    prefetchMint(sessionId);
+    router.push(`/booth/${sessionId}/realtime`);
   }
 
   return (
@@ -208,7 +206,7 @@ export default function ConsentPage() {
                   <polyline points="20 6 9 17 4 12"/>
                 </svg>
                 <span style={{ color: '#86efac', fontSize: 11, fontWeight: 600 }}>
-                  Voice assistant ready
+                  Microphone ready
                 </span>
               </>
             ) : (
@@ -224,7 +222,7 @@ export default function ConsentPage() {
                   ))}
                 </div>
                 <span style={{ color: 'rgba(9,246,238,0.5)', fontSize: 11, fontWeight: 600 }}>
-                  Preparing voice assistant…
+                  Checking microphone…
                 </span>
               </>
             )}

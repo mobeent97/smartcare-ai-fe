@@ -1,27 +1,17 @@
 'use client';
 
-import { useRef, useEffect } from 'react';
-import { getAvatarManager } from '@/lib/akool';
 import type { AvatarStatus } from '@/store/booth';
+
+// Static nurse card for the step-by-step booth pages. There is no streaming
+// avatar behind it any more — the booth's voice lives in the realtime page.
 
 interface AvatarPanelProps {
   avatarStatus: AvatarStatus;
   avatarType: 'nurse' | 'doctor';
   speechText?: string;
-  onVideoRef?: (el: HTMLVideoElement | null) => void;
 }
 
-export function AvatarPanel({ avatarStatus, avatarType, speechText, onVideoRef }: AvatarPanelProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  useEffect(() => {
-    const el = videoRef.current;
-    if (!el) return;
-    onVideoRef?.(el);
-    getAvatarManager()?.attachVideo(el);
-  }, [onVideoRef]);
-
-  const isLive = avatarStatus === 'live';
+export function AvatarPanel({ avatarStatus, avatarType, speechText }: AvatarPanelProps) {
   const isConnecting = avatarStatus === 'connecting';
 
   return (
@@ -34,16 +24,6 @@ export function AvatarPanel({ avatarStatus, avatarType, speechText, onVideoRef }
           className="avatar-glow rounded-full overflow-hidden"
           style={{ width: 260, height: 340, border: '2px solid rgba(0,255,230,0.3)', position: 'relative' }}
         >
-          {/* Real Agora video stream */}
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted={false}
-            className="w-full h-full object-cover"
-            style={{ display: isLive ? 'block' : 'none' }}
-          />
-
           {/* Connecting spinner */}
           {isConnecting && (
             <div
@@ -61,13 +41,13 @@ export function AvatarPanel({ avatarStatus, avatarType, speechText, onVideoRef }
                 }}
               />
               <span style={{ color: '#36c9c5', fontSize: 12, fontWeight: 600, textAlign: 'center', padding: '0 16px' }}>
-                Connecting avatar…
+                Connecting…
               </span>
             </div>
           )}
 
           {/* Placeholder when idle */}
-          {!isLive && !isConnecting && (
+          {!isConnecting && (
             <div
               className="w-full h-full flex items-center justify-center"
               style={{ backgroundColor: '#1f2937' }}
