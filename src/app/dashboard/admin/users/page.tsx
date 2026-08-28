@@ -76,7 +76,7 @@ export default function AdminUsersPage() {
   if (!_hasHydrated || userRole !== 'admin') return null;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'rgb(5,20,20)' }}>
+    <div className="tabbar-inset" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'rgb(5,20,20)' }}>
       <DashboardNav activeBoothCount={0} hasAlert={!!emergencyAlert} />
 
       {showInvite && (
