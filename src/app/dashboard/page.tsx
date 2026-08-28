@@ -116,6 +116,12 @@ function DashboardInner() {
     setTab('summary');
   }
 
+  // Phone only: return to the queue. On desktop both panes are always visible,
+  // so there is nothing to go back to.
+  function clearCase() {
+    router.replace('/dashboard');
+  }
+
   async function refreshCase() {
     if (!caseParam) return;
     const res = await api.getCaseDetail(caseParam);
@@ -195,15 +201,31 @@ function DashboardInner() {
 
       {/* ── Master / Detail body ───────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
+        {/* Sidebar. On a phone the queue and the case detail are two screens,
+            not two columns — a 312px rail leaves too little room for the
+            detail to be readable. Desktop is unchanged. */}
         <QueuePanel
           queue={queue}
           selectedCaseId={caseParam}
           onSelectCase={selectCase}
+          hiddenOnMobile={!!caseParam}
         />
 
         {/* Main panel */}
-        <main className="flex-1 overflow-y-auto">
+        <main className={`flex-1 overflow-y-auto ${caseParam ? 'block' : 'hidden md:block'}`}>
+          {/* Back to the queue — phone only. */}
+          {caseParam && (
+            <button
+              onClick={clearCase}
+              className="sticky top-0 z-10 flex w-full items-center gap-2 border-b border-dash-border bg-dash-surface px-4 py-3 text-sm font-semibold text-text-primary md:hidden"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+              Active Patients
+            </button>
+          )}
           {caseLoading ? (
             <div className="flex h-full items-center justify-center">
               <LoadingSpinner size="lg" />
@@ -288,7 +310,7 @@ function CasePanel({
       <CaseHeader session={session} complaint={complaint} />
       <CaseDetailTabs activeTab={tab} onTabChange={setTab} />
 
-      <div className="p-7">
+      <div className="p-4 md:p-7 safe-bottom">
         <div>
           {tab === 'summary' && (
             <SummaryView

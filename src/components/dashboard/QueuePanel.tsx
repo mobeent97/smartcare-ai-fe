@@ -26,6 +26,8 @@ function sortPatients(queue: TriageSession[], key: SortKey): TriageSession[] {
 }
 
 interface QueuePanelProps {
+  /** Phone only: the case detail is showing, so hide the list. */
+  hiddenOnMobile?: boolean;
   queue: TriageSession[];
   selectedCaseId: string | null;
   onSelectCase: (id: string) => void;
@@ -35,12 +37,22 @@ export function QueuePanel({
   queue,
   selectedCaseId,
   onSelectCase,
+  hiddenOnMobile = false,
 }: QueuePanelProps) {
   const [sortKey, setSortKey] = useState<SortKey>('priority');
   const sorted = useMemo(() => sortPatients(queue, sortKey), [queue, sortKey]);
 
   return (
-    <aside className="flex w-[312px] shrink-0 flex-col border-r border-dash-border bg-dash-surface">
+    <aside
+      className={
+        // Phone: the list owns the whole screen, because a 312px rail leaves
+        // ~128px for the case detail and every label wraps to one word per
+        // line. Desktop keeps the fixed rail beside the detail.
+        'flex flex-col border-dash-border bg-dash-surface ' +
+        'w-full border-r-0 md:w-[312px] md:shrink-0 md:border-r ' +
+        (hiddenOnMobile ? 'hidden md:flex' : 'flex')
+      }
+    >
       {/* ── Header ─────────────────────────────────────── */}
       <div className="flex items-center gap-2.5 border-b border-dash-border/50 px-5 py-4">
         <span className="text-[14px] font-bold text-text-primary">Active Patients</span>
