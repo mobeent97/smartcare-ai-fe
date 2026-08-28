@@ -1,4 +1,4 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 
@@ -8,6 +8,37 @@ const jetbrainsMono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-jet
 export const metadata: Metadata = {
   title: 'Smart Care AI',
   description: 'AI-powered medical triage booth',
+  // Pinned to an iOS home screen this launches without Safari chrome. The
+  // status bar sits ON TOP of the page, which is why every fixed edge below
+  // uses the safe-area insets.
+  appleWebApp: {
+    capable: true,
+    title: 'SmartCare',
+    statusBarStyle: 'black-translucent',
+  },
+  formatDetection: {
+    telephone: false,   // stop iOS turning vitals and ages into phone links
+  },
+  other: {
+    // Next emits the modern `mobile-web-app-capable`, which iOS ignores.
+    // Safari still keys standalone launch off the apple- prefixed tag, and
+    // without it a home-screen pin opens inside Safari with browser chrome.
+    'apple-mobile-web-app-capable': 'yes',
+  },
+};
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  // Let the page paint under the Dynamic Island and home indicator; the CSS
+  // then pads content back out with env(safe-area-inset-*). Without this the
+  // insets are always 0 and the standalone app has black bars.
+  viewportFit: 'cover',
+  // A kiosk form: pinch-zoom on a patient-facing booth causes accidental
+  // zoom that patients cannot undo. Text remains legible by design, not by
+  // zooming. maximumScale is deliberately not set to 1 elsewhere so that
+  // browser accessibility zoom still works on the dashboard.
+  themeColor: '#071c1c',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

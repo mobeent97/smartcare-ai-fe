@@ -16,13 +16,18 @@ export function AvatarPanel({ avatarStatus, avatarType, speechText }: AvatarPane
 
   return (
     <div
-      className="h-full min-h-screen flex flex-col items-center justify-end pb-10"
+      className="h-full flex flex-col items-center justify-end md:min-h-screen pt-6 pb-6 md:pb-10 safe-top"
       style={{ background: 'linear-gradient(to bottom, #0d1a2d, #0a0f1e)' }}
     >
       <div className="relative mb-4">
         <div
           className="avatar-glow rounded-full overflow-hidden"
-          style={{ width: 260, height: 340, border: '2px solid rgba(0,255,230,0.3)', position: 'relative' }}
+          style={{
+            width: 'min(260px, 46vw)',
+            height: 'min(340px, 60vw)',
+            border: '2px solid rgba(0,255,230,0.3)',
+            position: 'relative',
+          }}
         >
           {/* Connecting spinner */}
           {isConnecting && (

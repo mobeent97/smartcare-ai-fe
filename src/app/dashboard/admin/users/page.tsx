@@ -110,8 +110,11 @@ export default function AdminUsersPage() {
           </button>
         </div>
 
-        {/* Users table */}
-        <div style={{ background: 'rgb(11,40,39)', border: '1px solid rgba(21,81,80,0.6)', borderRadius: 16, overflow: 'hidden', marginBottom: 32 }}>
+        {/* Users table — six columns cannot fit a phone, so the table keeps its
+            shape and scrolls inside its own container rather than making the
+            whole page scroll sideways. */}
+        <div className="scroll-x" style={{ background: 'rgb(11,40,39)', border: '1px solid rgba(21,81,80,0.6)', borderRadius: 16, marginBottom: 32 }}>
+          <div style={{ minWidth: 720 }}>
           {/* Table header */}
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 2fr 1fr 1fr 1fr 1fr', gap: 0, padding: '14px 24px', borderBottom: '1px solid rgba(21,81,80,0.4)', background: 'rgba(5,20,20,0.5)' }}>
             {['Name', 'Email', 'Role', 'Status', 'Joined', 'Actions'].map(h => (
@@ -199,6 +202,7 @@ export default function AdminUsersPage() {
               );
             })
           )}
+          </div>
         </div>
 
         {/* Role capability matrix */}

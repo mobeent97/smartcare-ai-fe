@@ -537,11 +537,16 @@ export default function RealtimeBoothPage() {
 
         {/* ── Header ── */}
         <header style={{
-          height: 60,
+          minHeight: 60,
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
           padding: '0 24px',
+          // Standalone iOS draws the status bar / Dynamic Island OVER the page.
+          // Without this the logo sits underneath it.
+          paddingTop: 'var(--safe-top)',
+          paddingLeft: 'max(24px, var(--safe-left))',
+          paddingRight: 'max(24px, var(--safe-right))',
           borderBottom: '1px solid rgba(9,246,238,0.08)',
           background: 'rgba(7,28,28,0.9)',
           backdropFilter: 'blur(12px)',
@@ -613,7 +618,16 @@ export default function RealtimeBoothPage() {
         <ProgressStrip completed={completedSteps} done={triageDone} />
 
         {/* ── Main ── */}
-        <div className="flex-1 flex flex-col items-center" style={{ padding: '32px 20px 24px', gap: 28 }}>
+        <div
+          className="flex-1 flex flex-col items-center"
+          style={{
+            // Bottom inset keeps the phase pill above the home indicator.
+            padding: '32px 20px calc(24px + var(--safe-bottom))',
+            paddingLeft: 'max(20px, var(--safe-left))',
+            paddingRight: 'max(20px, var(--safe-right))',
+            gap: 28,
+          }}
+        >
 
           {/* Video avatar stage */}
           <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
@@ -636,8 +650,10 @@ export default function RealtimeBoothPage() {
 
             {/* Video card with crossfaded loops */}
             <div style={{
-              width: 320,
-              height: 320,
+              // Fluid, but never larger than the original kiosk size. 72vw
+              // leaves room for the -34px decorative rings on a phone.
+              width: 'min(320px, 72vw)',
+              height: 'min(320px, 72vw)',
               borderRadius: 24,
               overflow: 'hidden',
               border: '2px solid rgba(9,246,238,0.35)',
