@@ -270,8 +270,12 @@ export default function TriageResultsPage() {
       <div className="min-h-screen flex flex-col" style={{ background: 'var(--color-dash-bg)' }}>
 
         {/* ── Top bar ── */}
-        <header className="sticky top-0 z-10 flex items-center justify-between px-6 h-14 border-b"
-          style={{ background: 'rgba(5,20,20,0.95)', borderColor: 'rgba(21,81,80,0.4)', backdropFilter: 'blur(10px)' }}>
+        <header className="sticky top-0 z-10 flex items-center justify-between px-4 md:px-6 min-h-14 border-b"
+          style={{
+            background: 'rgba(5,20,20,0.95)', borderColor: 'rgba(21,81,80,0.4)', backdropFilter: 'blur(10px)',
+            paddingTop: 'var(--safe-top)',
+            paddingLeft: 'max(16px, var(--safe-left))', paddingRight: 'max(16px, var(--safe-right))',
+          }}>
           <div className="flex items-center gap-2">
             <span style={{ color: '#09f6ee' }}><EcgLine /></span>
             <span className="font-bold text-sm" style={{ fontFamily: 'monospace', color: 'var(--color-text-primary)', letterSpacing: '-0.02em' }}>
@@ -335,8 +339,8 @@ export default function TriageResultsPage() {
             )}
           </div>
 
-          {/* ── Download PDF (top, easy to find) ── */}
-          <div className="r-fade-1">
+          {/* ── Download PDF (top, easy to find on a wide screen) ── */}
+          <div className="r-fade-1 hidden md:block">
             <button
               type="button"
               onClick={async () => {
@@ -569,7 +573,11 @@ export default function TriageResultsPage() {
           {ctasExpect && (
             <div className="r-fade-3 rounded-2xl p-4 border flex items-start gap-3"
               style={{ background: `${ctasCfg?.bg ?? 'rgba(9,246,238,0.04)'}`, borderColor: `${ctasCfg?.border ?? 'rgba(9,246,238,0.2)'}50` }}>
-              <span style={{ fontSize: 20, flexShrink: 0 }}>🕐</span>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+                   strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"
+                   style={{ flexShrink: 0, color: ctasCfg?.color ?? '#09f6ee' }}>
+                <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+              </svg>
               <p className="text-sm leading-relaxed font-semibold" style={{ color: ctasCfg?.color ?? 'var(--color-text-primary)' }}>
                 {ctasExpect}
               </p>
@@ -607,8 +615,16 @@ export default function TriageResultsPage() {
             All final medical decisions are made by a licensed clinician.
           </p>
 
-          {/* ── Download PDF ── */}
-          <div className="r-fade-5 pt-1">
+          {/* ── Download PDF — sticky in the thumb zone on phones ── */}
+          <div
+            className="r-fade-5 pt-1 sticky bottom-0 md:static"
+            style={{
+              paddingBottom: 'max(12px, var(--safe-bottom))',
+              // Fade the page out behind the CTA so it reads as a bar, not a card.
+              background: 'linear-gradient(to top, var(--color-dash-bg) 70%, transparent)',
+              marginLeft: -20, marginRight: -20, paddingLeft: 20, paddingRight: 20,
+            }}
+          >
             <button
               type="button"
               onClick={async () => {

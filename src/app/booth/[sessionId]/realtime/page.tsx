@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { RealtimeClient, type ToolDispatcher } from '@/lib/openai-realtime';
+import { RealtimeClient, detectDeviceProfile, type ToolDispatcher } from '@/lib/openai-realtime';
 import { streamLog } from '@/lib/stream-log';
 import { LatencyTracker } from '@/lib/turn-latency';
 import { takePrefetchedMint } from '@/lib/realtime-prewarm';
@@ -48,6 +48,9 @@ export default function RealtimeBoothPage() {
   const [assistantTurnId, setAssistantTurnId] = useState(0);
   const [emergencyTriggered, setEmergencyTriggered] = useState(false);
   const [audioEl, setAudioEl] = useState<HTMLAudioElement | null>(null);
+  const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
+  const [micMuted, setMicMuted] = useState(false);
+  const [helpSent, setHelpSent] = useState(false);
   const [completedSteps, setCompletedSteps] = useState<Set<string>>(new Set());
   const [triageDone, setTriageDone] = useState(false);
 
@@ -278,7 +281,7 @@ export default function RealtimeBoothPage() {
         // whenever the prefetch is missing, stale, or failed.
         const prefetched = await takePrefetchedMint(sessionId);
         if (prefetched) pushDebug('mint_prefetched');
-        const mint = prefetched ?? (await api.createRealtimeSession(sessionId));
+        const mint = prefetched ?? (await api.createRealtimeSession(sessionId, detectDeviceProfile()));
         latency.coldMark('mint_done');
         if (cancelled) return;
 
@@ -415,6 +418,7 @@ export default function RealtimeBoothPage() {
               audioStartedAtRef.current = 0;
               setPhase((p) => (p === 'speaking' ? 'listening' : p));
               pushDebug('barge_in');
+              streamLog(sessionId, 'BARGE_IN');
             },
             onUserSpeechStart: () => {
               if (cancelled) return;
@@ -430,6 +434,15 @@ export default function RealtimeBoothPage() {
               latency.speechStop();
               setPhase((p) => (p === 'speaking' ? p : 'thinking'));
               pushDebug('user_speech_stopped');
+            },
+            onTurnForced: (attempt) => {
+              if (cancelled) return;
+              // Server never opened a response after the patient's turn; the
+              // client committed the audio and asked for one. Invisible to the
+              // patient — recorded so latency_report can show how often
+              // semantic VAD holds a turn open.
+              pushDebug('turn_forced', `attempt=${attempt}`);
+              streamLog(sessionId, 'TURN_FORCED', { attempt });
             },
             onStall: (attempt) => {
               if (cancelled) return;
@@ -451,6 +464,17 @@ export default function RealtimeBoothPage() {
                 audioContainerRef.current.appendChild(el);
               }
               setAudioEl(el);
+              // iOS will not autoplay remote audio without a user gesture in
+              // some configurations. If playback is refused, ask for one tap
+              // rather than letting the nurse talk silently.
+              el.play().catch((err: unknown) => {
+                if (cancelled) return;
+                const name = (err as { name?: string })?.name;
+                if (name === 'NotAllowedError') {
+                  setNeedsAudioUnlock(true);
+                  pushDebug('audio_autoplay_blocked');
+                }
+              });
             },
           },
           instrumentTools(tools, latency),
@@ -496,15 +520,17 @@ export default function RealtimeBoothPage() {
   }, [sessionId, router]);
 
   const isSpeaking = phase === 'speaking';
+  // Plain language, present tense, no jargon. "One moment" rather than
+  // "Thinking" because the patient does not need to know a model exists.
   const phaseLabel = phase === 'speaking'
-    ? 'Nurse AI Speaking'
+    ? 'Nurse is speaking'
     : phase === 'listening'
-      ? 'Listening…'
+      ? micMuted ? 'Microphone off' : 'Listening'
       : phase === 'thinking'
-        ? 'Thinking…'
+        ? 'One moment…'
         : phase === 'connecting'
           ? 'Connecting…'
-          : 'Disconnected';
+          : 'Connection lost';
 
   return (
     <>
@@ -598,31 +624,123 @@ export default function RealtimeBoothPage() {
               clientRef.current = null;
               router.push(`/booth/${sessionId}/emergency`);
             }}
+            aria-label="Emergency — get help now"
             style={{
               display: 'flex', alignItems: 'center', gap: 6,
               background: 'rgba(220,38,38,0.1)',
               border: '1px solid rgba(220,38,38,0.4)',
-              borderRadius: 8,
+              borderRadius: 10,
               padding: '6px 14px',
+              minHeight: 44, minWidth: 44,
               color: '#fca5a5',
               fontSize: 12,
               fontWeight: 700,
             }}
           >
-            <span style={{ fontSize: 14 }}>🚨</span>
-            Emergency
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <span className="hidden md:inline">Emergency</span>
           </button>
         </header>
 
         {/* ── Progress strip ── */}
         <ProgressStrip completed={completedSteps} done={triageDone} />
 
+        {/* ── Audio unlock (iOS refused autoplay) ── */}
+        {needsAudioUnlock && (
+          <button
+            onClick={() => {
+              audioEl?.play()
+                .then(() => setNeedsAudioUnlock(false))
+                .catch(() => { /* keep the gate up; they can tap again */ });
+            }}
+            className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-4"
+            style={{ background: 'rgba(5,20,20,0.96)', border: 'none', color: '#e0fffe' }}
+          >
+            <span style={{
+              width: 88, height: 88, borderRadius: '50%',
+              background: 'rgba(9,246,238,0.12)', border: '2px solid rgba(9,246,238,0.5)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              animation: 'orb-glow 2s ease-in-out infinite',
+            }}>
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#09f6ee" strokeWidth="2"
+                   strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                <path d="M15.5 8.5a5 5 0 0 1 0 7" /><path d="M19 5a9 9 0 0 1 0 14" />
+              </svg>
+            </span>
+            <span style={{ fontSize: 20, fontWeight: 700 }}>Tap to hear the nurse</span>
+            <span style={{ fontSize: 14, color: 'rgba(224,255,254,0.65)' }}>Your phone needs one tap to play sound</span>
+          </button>
+        )}
+
+        {/* ── Controls: thumb zone, always reachable ── */}
+        <nav
+          aria-label="Call controls"
+          className="fixed inset-x-0 bottom-0 z-30 flex justify-center"
+          style={{
+            background: 'rgba(5,20,20,0.85)',
+            backdropFilter: 'blur(20px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+            borderTop: '1px solid rgba(9,246,238,0.1)',
+            paddingTop: 10,
+            paddingBottom: 'max(10px, var(--safe-bottom))',
+            paddingLeft: 'max(16px, var(--safe-left))',
+            paddingRight: 'max(16px, var(--safe-right))',
+          }}
+        >
+          <div style={{ display: 'flex', gap: 12, width: '100%', maxWidth: 560 }}>
+            <ControlButton
+              label="Repeat"
+              hint="Say the question again"
+              disabled={phase === 'connecting' || phase === 'error' || triageDone}
+              onClick={() => { clientRef.current?.repeatLastQuestion(); pushDebug('repeat_requested'); }}
+              icon={<path d="M1 4v6h6" />}
+              icon2={<path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />}
+            />
+            <ControlButton
+              label={micMuted ? 'Unmute' : 'Mute'}
+              hint={micMuted ? 'The nurse cannot hear you' : 'Turn your microphone off'}
+              active={micMuted}
+              disabled={phase === 'connecting' || phase === 'error'}
+              onClick={() => {
+                const next = !micMuted;
+                setMicMuted(next);
+                clientRef.current?.setMicEnabled(!next);
+                pushDebug(next ? 'mic_muted' : 'mic_unmuted');
+              }}
+              icon={micMuted
+                ? <><line x1="1" y1="1" x2="23" y2="23" /><path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" /><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" /><line x1="12" y1="19" x2="12" y2="23" /></>
+                : <><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" y1="19" x2="12" y2="23" /></>}
+            />
+            <ControlButton
+              label={helpSent ? 'Staff notified' : 'Call for help'}
+              hint="Ask a person to come over"
+              tone="amber"
+              active={helpSent}
+              disabled={helpSent}
+              onClick={async () => {
+                try {
+                  await api.requestHelp(sessionId);
+                  setHelpSent(true);
+                  streamLog(sessionId, 'HELP_REQUESTED');
+                  setTimeout(() => setHelpSent(false), 20000);
+                } catch { pushDebug('help_request_failed'); }
+              }}
+              icon={<><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></>}
+            />
+          </div>
+        </nav>
+
         {/* ── Main ── */}
         <div
-          className="flex-1 flex flex-col items-center"
+          className="booth-stage flex-1 flex flex-col items-center"
           style={{
-            // Bottom inset keeps the phase pill above the home indicator.
-            padding: '32px 20px calc(24px + var(--safe-bottom))',
+            // Leave room for the fixed control bar + home indicator.
+            padding: '24px 20px calc(var(--booth-controls-h) + var(--safe-bottom) + 24px)',
             paddingLeft: 'max(20px, var(--safe-left))',
             paddingRight: 'max(20px, var(--safe-right))',
             gap: 28,
@@ -649,11 +767,12 @@ export default function RealtimeBoothPage() {
             }} />
 
             {/* Video card with crossfaded loops */}
-            <div style={{
-              // Fluid, but never larger than the original kiosk size. 72vw
-              // leaves room for the -34px decorative rings on a phone.
-              width: 'min(320px, 72vw)',
-              height: 'min(320px, 72vw)',
+            <div className="booth-orb" style={{
+              // Fluid, but never larger than the original kiosk size. 62vw
+              // leaves room for the -34px decorative rings AND the captions on
+              // an iPhone X-height screen.
+              width: 'min(320px, 62vw)',
+              height: 'min(320px, 62vw)',
               borderRadius: 24,
               overflow: 'hidden',
               border: '2px solid rgba(9,246,238,0.35)',
@@ -741,8 +860,16 @@ export default function RealtimeBoothPage() {
                   borderRadius: '18px 0 0 18px',
                 }} />
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, paddingLeft: 8 }}>
-                  <span style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }}>🩺</span>
-                  <p style={{ color: '#e0fffe', fontSize: 15, lineHeight: 1.65, fontWeight: 500, margin: 0 }}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#09f6ee" strokeWidth="1.9"
+                       strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }}>
+                    <path d="M4.8 3v5.4a4.2 4.2 0 0 0 8.4 0V3" /><circle cx="18.4" cy="13.6" r="2.4" />
+                    <path d="M9 12.6v2.2a5.4 5.4 0 0 0 7 5.2" />
+                  </svg>
+                  <p
+                    className="caption-text"
+                    aria-live="polite"
+                    style={{ color: '#e0fffe', fontSize: 'clamp(16px, 4.4vw, 19px)', lineHeight: 1.55, fontWeight: 500, margin: 0 }}
+                  >
                     {assistantSubtitle}
                   </p>
                 </div>
@@ -1024,6 +1151,50 @@ function instrumentTools(tools: ToolDispatcher, latency: LatencyTracker): ToolDi
     };
   }
   return wrapped as unknown as ToolDispatcher;
+}
+
+// ─── Call control button ───────────────────────────────────────────────────
+// >=56px tall, label always visible (no icon-only controls for patients),
+// pressed feedback via colour not transform so the bar never shifts.
+function ControlButton({
+  label, hint, icon, icon2, onClick, active = false, disabled = false, tone = 'teal',
+}: {
+  label: string;
+  hint: string;
+  icon: React.ReactNode;
+  icon2?: React.ReactNode;
+  onClick: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  tone?: 'teal' | 'amber';
+}) {
+  const accent = tone === 'amber' ? '#f59e0b' : '#09f6ee';
+  const accentSoft = tone === 'amber' ? 'rgba(245,158,11,0.16)' : 'rgba(9,246,238,0.14)';
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      title={hint}
+      style={{
+        flex: 1, minHeight: 56,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
+        borderRadius: 14,
+        border: `1px solid ${active ? accent : 'rgba(9,246,238,0.18)'}`,
+        background: active ? accentSoft : 'rgba(11,40,39,0.6)',
+        color: disabled ? 'rgba(93,213,211,0.35)' : active ? accent : '#cffffd',
+        cursor: disabled ? 'default' : 'pointer',
+        transition: 'background 0.15s, color 0.15s, border-color 0.15s',
+        padding: '6px 8px',
+      }}
+    >
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {icon}{icon2}
+      </svg>
+      <span style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: '0.01em', whiteSpace: 'nowrap' }}>{label}</span>
+    </button>
+  );
 }
 
 // ─── Voice-only orb ────────────────────────────────────────────────────────

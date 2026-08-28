@@ -15,6 +15,16 @@
  * PHI handling: this module logs only event types, never event payloads.
  */
 
+export type DeviceProfile = 'handheld' | 'kiosk';
+
+/** Phone held to the face vs. a kiosk across the room. The backend tunes the
+ *  server-side noise reduction to match; `kiosk` is the safe default. */
+export function detectDeviceProfile(): DeviceProfile {
+  if (typeof window === 'undefined') return 'kiosk';
+  const coarse = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+  return coarse && window.innerWidth < 900 ? 'handheld' : 'kiosk';
+}
+
 export interface RealtimeSessionMint {
   client_secret: string;
   expires_at: number;
@@ -50,6 +60,10 @@ export interface RealtimeCallbacks {
    *  re-prompting it. `attempt` is 1-based. Diagnostic only — the recovery is
    *  automatic. */
   onStall?: (attempt: number) => void;
+  /** The patient stopped talking but the server never opened a response, so
+   *  the client committed the audio and asked for one itself. Diagnostic —
+   *  the patient sees nothing. */
+  onTurnForced?: (attempt: number) => void;
   onAudioElement: (el: HTMLAudioElement) => void;
   /** Connection-setup checkpoints, for cold-start instrumentation. Fired as
    *  each stage of connect() begins and ends so the page can see which stage
@@ -86,6 +100,15 @@ const RESPONSE_STALL_MS = 4000;
 // of looping response.create forever.
 const MAX_STALL_RETRIES = 2;
 
+// How long after the patient stops talking we wait for the SERVER to open a
+// response before forcing the turn ourselves. semantic_vad holds a turn open
+// until it judges the utterance complete; a distressed patient who trails off
+// ("it hurts… here… since…") can never satisfy that, and the booth sits in
+// "thinking" forever. 3s is long enough for a slow speaker's natural pause,
+// short enough that a stall reads as a beat, not a fault.
+const TURN_FORCE_MS = 3000;
+const MAX_TURN_FORCES = 2;
+
 export class RealtimeClient {
   private pc: RTCPeerConnection | null = null;
   private dc: RTCDataChannel | null = null;
@@ -117,6 +140,10 @@ export class RealtimeClient {
   private pendingResponseCreate = false;
   private stallTimer: ReturnType<typeof setTimeout> | null = null;
   private stallRetries = 0;
+  // Server-VAD path: the server is supposed to create the response after the
+  // patient's turn. Nothing above covers the case where it simply doesn't.
+  private turnTimer: ReturnType<typeof setTimeout> | null = null;
+  private turnForces = 0;
 
   constructor(
     private mint: RealtimeSessionMint,
@@ -231,18 +258,29 @@ export class RealtimeClient {
 
     switch (type) {
       case 'input_audio_buffer.speech_started':
+        // Patient is (still) talking: a turn is not over, so do not force one.
+        this.clearTurnWatchdog();
+        this.turnForces = 0;
         this.callbacks.onUserSpeechStart();
         break;
       case 'input_audio_buffer.speech_stopped':
+        // From here the server owes us a response. Start the clock.
+        this.armTurnWatchdog();
+        this.callbacks.onUserSpeechStop();
+        break;
       case 'input_audio_buffer.committed':
+        // Committed but not yet responded — keep the clock running; it is
+        // cleared by response.created.
         this.callbacks.onUserSpeechStop();
         break;
       case 'response.created':
         this.currentResponseHasAudio = false;
         this.responseActive = true;
-        // The model is responding — nothing is stuck.
+        // The model is responding — nothing is stuck on either path.
         this.clearStallWatchdog();
+        this.clearTurnWatchdog();
         this.stallRetries = 0;
+        this.turnForces = 0;
         this.callbacks.onResponseStart();
         break;
       // GA WebRTC playback boundaries: the server tracks the audio it has
@@ -428,6 +466,59 @@ export class RealtimeClient {
     }
   }
 
+  /** Force the patient's turn through if the server never opens a response.
+   *
+   *  Commits whatever audio is buffered and asks for a response. Handles both
+   *  the semantic-VAD hold (utterance judged incomplete) and the phone echo
+   *  case (nurse's own voice interrupted her, the "turn" was garbage and never
+   *  committed). The prompt tells the model to repeat its last question when a
+   *  turn is empty or unintelligible, so the worst outcome is a repeat — never
+   *  silence. */
+  private armTurnWatchdog(): void {
+    this.clearTurnWatchdog();
+    this.turnTimer = setTimeout(() => {
+      this.turnTimer = null;
+      if (this.destroyed) return;
+      // A response opened in the meantime (or we are mid-tool-call and will
+      // request one ourselves) — nothing to do.
+      if (this.responseActive || this.pendingResponseCreate) return;
+      if (this.turnForces >= MAX_TURN_FORCES) {
+        this.callbacks.onError('the assistant did not respond');
+        return;
+      }
+      this.turnForces++;
+      this.callbacks.onTurnForced?.(this.turnForces);
+      this.send({ type: 'input_audio_buffer.commit' });
+      this.requestResponse(); // arms the stall watchdog for the create itself
+      // If even the forced create produces nothing, try once more.
+      this.armTurnWatchdog();
+    }, TURN_FORCE_MS);
+  }
+
+  private clearTurnWatchdog(): void {
+    if (this.turnTimer) {
+      clearTimeout(this.turnTimer);
+      this.turnTimer = null;
+    }
+  }
+
+  /** Ask the model to say its last question again — for a patient who did not
+   *  hear it, without making them speak. Safe while a response is active: the
+   *  request is queued behind it. */
+  repeatLastQuestion(): void {
+    if (this.destroyed) return;
+    if (this.responseActive) {
+      this.pendingResponseCreate = true;
+      return;
+    }
+    this.responseActive = true;
+    this.send({
+      type: 'response.create',
+      response: { instructions: 'Briefly repeat your last question to the patient, in your own words.' },
+    });
+    this.armStallWatchdog();
+  }
+
   private send(payload: Record<string, unknown>): void {
     if (this.dc?.readyState === 'open') {
       this.dc.send(JSON.stringify(payload));
@@ -437,6 +528,7 @@ export class RealtimeClient {
   destroy(): void {
     this.destroyed = true;
     this.clearStallWatchdog();
+    this.clearTurnWatchdog();
     try {
       this.dc?.close();
     } catch { /* ignore */ }
