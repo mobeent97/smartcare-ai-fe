@@ -14,7 +14,13 @@
 //     minting builds system instructions from the session. Never before.
 
 import { api } from './api';
-import { detectDeviceProfile, type RealtimeSessionMint } from './openai-realtime';
+import {
+  CallbackRelay,
+  RealtimeClient,
+  ToolRelay,
+  detectDeviceProfile,
+  type RealtimeSessionMint,
+} from './openai-realtime';
 
 interface CachedMint {
   sessionId: string;
@@ -96,4 +102,87 @@ export async function takePrefetchedMint(
   } catch {
     return null;
   }
+}
+
+// ─── Pre-CONNECT (not just pre-mint) ─────────────────────────────────────────
+// The mint is ~7ms once prefetched; the remaining cold start is the WebRTC
+// handshake itself — SDP exchange 1.1–1.3s plus data-channel open 0.9–1.6s,
+// measured. Both can run while the patient is still walking from the consent
+// screen to the booth screen. The client is built against relays that buffer
+// every event until the booth page attaches its real callbacks, so nothing is
+// lost and — critically — the greeting is NOT requested until the page is
+// actually on screen (the page calls startConversation() from onConnected,
+// which the relay replays on attach).
+
+export interface PrewarmedClient {
+  client: RealtimeClient;
+  mint: RealtimeSessionMint;
+}
+
+interface CachedClient extends PrewarmedClient {
+  sessionId: string;
+  expires: ReturnType<typeof setTimeout>;
+}
+
+let cachedClient: CachedClient | null = null;
+
+/** A prewarmed client nobody claims is a live mic and a billable session with
+ *  no page. Tear it down if the booth page has not arrived in this long. */
+const PREWARM_TTL_MS = 45_000;
+
+function dropCachedClient(): void {
+  if (!cachedClient) return;
+  clearTimeout(cachedClient.expires);
+  cachedClient.client.destroy();
+  cachedClient = null;
+}
+
+/**
+ * Mint AND connect ahead of the booth page. Call on "I agree" — after consent
+ * is recorded, never before. Fire-and-forget; failures fall back to the
+ * page's normal connect path.
+ */
+export function prewarmConnection(sessionId: string): void {
+  if (cachedClient?.sessionId === sessionId) return;
+  dropCachedClient();
+  prefetchMint(sessionId);
+  void (async () => {
+    let mint: RealtimeSessionMint | null = null;
+    try {
+      mint = await takePrefetchedMint(sessionId);
+    } catch {
+      mint = null;
+    }
+    if (!mint) return;
+    const client = new RealtimeClient(mint, new CallbackRelay(), new ToolRelay());
+    const entry: CachedClient = {
+      sessionId,
+      mint,
+      client,
+      expires: setTimeout(() => {
+        if (cachedClient === entry) dropCachedClient();
+      }, PREWARM_TTL_MS),
+    };
+    cachedClient = entry;
+    try {
+      await client.connect();
+    } catch {
+      // Mic refused, SDP failed, whatever — the page will try itself and
+      // surface the real error with proper UI.
+      if (cachedClient === entry) dropCachedClient();
+    }
+  })();
+}
+
+/**
+ * Hand over a prewarmed client for this session, or null. Consumed once. The
+ * caller must attach() its callbacks/tools immediately; buffered events
+ * (including onConnected) replay at that moment.
+ */
+export function takePrefetchedClient(sessionId: string): PrewarmedClient | null {
+  const entry = cachedClient;
+  if (!entry || entry.sessionId !== sessionId) return null;
+  clearTimeout(entry.expires);
+  cachedClient = null;
+  return { client: entry.client, mint: entry.mint };
 }

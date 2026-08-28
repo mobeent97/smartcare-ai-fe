@@ -3,10 +3,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { RealtimeClient, detectDeviceProfile, type ToolDispatcher } from '@/lib/openai-realtime';
+import {
+  RealtimeClient,
+  MicPermissionError,
+  detectDeviceProfile,
+  type RealtimeCallbacks,
+  type ToolDispatcher,
+} from '@/lib/openai-realtime';
 import { streamLog } from '@/lib/stream-log';
 import { LatencyTracker } from '@/lib/turn-latency';
-import { takePrefetchedMint } from '@/lib/realtime-prewarm';
+import { takePrefetchedMint, takePrefetchedClient } from '@/lib/realtime-prewarm';
 
 type Phase = 'connecting' | 'listening' | 'thinking' | 'speaking' | 'error';
 
@@ -50,6 +56,9 @@ export default function RealtimeBoothPage() {
   const [audioEl, setAudioEl] = useState<HTMLAudioElement | null>(null);
   const [needsAudioUnlock, setNeedsAudioUnlock] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
+  const [micDenied, setMicDenied] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [assistantInterrupted, setAssistantInterrupted] = useState(false);
   const [helpSent, setHelpSent] = useState(false);
   const [completedSteps, setCompletedSteps] = useState<Set<string>>(new Set());
   const [triageDone, setTriageDone] = useState(false);
@@ -265,7 +274,11 @@ export default function RealtimeBoothPage() {
 
     let reconnectAttempts = 0;
     let mintInFlight = false;
-    const MAX_RECONNECTS = 1;
+    // Hospital Wi-Fi drops. Three tries with backoff (1s, 2s, 4s); the backend
+    // rebuilds a RESUME block on every fresh mint so the patient never repeats
+    // themselves.
+    const MAX_RECONNECTS = 3;
+    const backoffMs = (attempt: number) => 1000 * 2 ** (attempt - 1);
 
     const connectClient = async () => {
       // Guard against React StrictMode double-mount + Fast Refresh causing
@@ -275,22 +288,18 @@ export default function RealtimeBoothPage() {
       mintInFlight = true;
       const latency = (latencyRef.current ??= new LatencyTracker(sessionId));
       try {
-        latency.coldMark('mint_start');
-        // The consent page starts this round trip on "I agree", so by the time
-        // we get here it is usually already done. Falls back to minting inline
-        // whenever the prefetch is missing, stale, or failed.
-        const prefetched = await takePrefetchedMint(sessionId);
-        if (prefetched) pushDebug('mint_prefetched');
-        const mint = prefetched ?? (await api.createRealtimeSession(sessionId, detectDeviceProfile()));
-        latency.coldMark('mint_done');
-        if (cancelled) return;
+        // Prefer a connection the consent page already opened. Its relays
+        // buffered every event (incl. onConnected) until we attach here, which
+        // is what triggers the greeting — so the nurse speaks the moment the
+        // page is on screen, not 2–3s later.
+        const pre = takePrefetchedClient(sessionId);
+        let client: RealtimeClient;
 
-        const client = new RealtimeClient(
-          mint,
-          {
+        const callbacks: RealtimeCallbacks = {
             onConnected: () => {
               if (cancelled) return;
               reconnectAttempts = 0;            // healthy connection resets budget
+              setReconnecting(false);
               pushDebug('connected');
               setPhase('listening');
               client.startConversation();
@@ -306,12 +315,14 @@ export default function RealtimeBoothPage() {
                 reconnectAttempts++;
                 pushDebug('reconnect_attempt', String(reconnectAttempts));
                 streamLog(sessionId, 'RT_RECONNECT_ATTEMPT', { attempt: reconnectAttempts });
+                setReconnecting(true);
                 setPhase('connecting');
                 clientRef.current?.destroy();
                 clientRef.current = null;
-                connectClient();
+                setTimeout(() => { if (!cancelled) connectClient(); }, backoffMs(reconnectAttempts));
                 return;
               }
+              setReconnecting(false);
               setPhase('error');
               setErrorMsg(reason ?? 'Connection lost');
             },
@@ -332,6 +343,7 @@ export default function RealtimeBoothPage() {
               // New model response begins — reset the text buffer for this turn.
               assistantBufRef.current = '';
               setAssistantSubtitle('');
+              setAssistantInterrupted(false);
               setAssistantTurnId((n) => n + 1);
               audioStartedAtRef.current = 0;
               if (speakStopTimerRef.current) {
@@ -419,6 +431,9 @@ export default function RealtimeBoothPage() {
               setPhase((p) => (p === 'speaking' ? 'listening' : p));
               pushDebug('barge_in');
               streamLog(sessionId, 'BARGE_IN');
+              // The caption streams ahead of the audio, so it shows words the
+              // nurse never got to say. Flag it rather than pretend.
+              setAssistantInterrupted(true);
             },
             onUserSpeechStart: () => {
               if (cancelled) return;
@@ -434,6 +449,19 @@ export default function RealtimeBoothPage() {
               latency.speechStop();
               setPhase((p) => (p === 'speaking' ? p : 'thinking'));
               pushDebug('user_speech_stopped');
+            },
+            onConnectionStateChange: (state) => {
+              if (cancelled) return;
+              pushDebug('pc_state', state);
+              // 'disconnected' is transient ICE probing — say so, do not tear
+              // down. 'failed'/'closed' arrive via onDisconnected.
+              if (state === 'disconnected') {
+                setReconnecting(true);
+                setPhase((p) => (p === 'error' ? p : 'connecting'));
+              } else if (state === 'connected') {
+                setReconnecting(false);
+                setPhase((p) => (p === 'connecting' ? 'listening' : p));
+              }
             },
             onTurnForced: (attempt) => {
               if (cancelled) return;
@@ -476,21 +504,52 @@ export default function RealtimeBoothPage() {
                 }
               });
             },
-          },
-          instrumentTools(tools, latency),
-        );
-        clientRef.current = client;
-        await client.connect();
+        };
+
+        if (pre) {
+          client = pre.client;
+          clientRef.current = client;
+          latency.coldMark('mint_start');
+          latency.coldMark('mint_done');
+          pushDebug('prewarmed_connection', pre.client.isConnected ? 'already open' : 'still connecting');
+          streamLog(sessionId, 'PREWARMED_CONNECTION', { open: pre.client.isConnected });
+          if (cancelled) { client.destroy(); return; }
+          client.attach(callbacks, instrumentTools(tools, latency));
+        } else {
+          latency.coldMark('mint_start');
+          // The consent page starts this round trip on "I agree", so by the time
+          // we get here it is usually already done. Falls back to minting inline
+          // whenever the prefetch is missing, stale, or failed.
+          const prefetched = await takePrefetchedMint(sessionId);
+          if (prefetched) pushDebug('mint_prefetched');
+          const mint = prefetched ?? (await api.createRealtimeSession(sessionId, detectDeviceProfile()));
+          latency.coldMark('mint_done');
+          if (cancelled) return;
+          client = new RealtimeClient(mint, callbacks, instrumentTools(tools, latency));
+          clientRef.current = client;
+          await client.connect();
+        }
       } catch (e) {
         if (cancelled) return;
         const msg = e instanceof Error ? e.message : 'Failed to start session';
+        // No microphone = no voice booth. Retrying will not change that;
+        // show the specific fix instead of burning reconnect attempts.
+        if (e instanceof MicPermissionError) {
+          setMicDenied(true);
+          setPhase('error');
+          setErrorMsg(msg);
+          streamLog(sessionId, 'MIC_DENIED', { cause: e.cause_name });
+          return;
+        }
         // A failed initial connect also burns a reconnect slot before giving up.
         if (reconnectAttempts < MAX_RECONNECTS) {
           reconnectAttempts++;
           pushDebug('reconnect_attempt', String(reconnectAttempts));
-          setTimeout(() => { if (!cancelled) connectClient(); }, 1000);
+          setReconnecting(true);
+          setTimeout(() => { if (!cancelled) connectClient(); }, backoffMs(reconnectAttempts));
           return;
         }
+        setReconnecting(false);
         setPhase('error');
         setErrorMsg(msg);
       } finally {
@@ -529,7 +588,7 @@ export default function RealtimeBoothPage() {
       : phase === 'thinking'
         ? 'One moment…'
         : phase === 'connecting'
-          ? 'Connecting…'
+          ? reconnecting ? 'Reconnecting…' : 'Connecting…'
           : 'Connection lost';
 
   return (
@@ -868,9 +927,17 @@ export default function RealtimeBoothPage() {
                   <p
                     className="caption-text"
                     aria-live="polite"
-                    style={{ color: '#e0fffe', fontSize: 'clamp(16px, 4.4vw, 19px)', lineHeight: 1.55, fontWeight: 500, margin: 0 }}
+                    style={{
+                      color: assistantInterrupted ? 'rgba(224,255,254,0.55)' : '#e0fffe',
+                      fontSize: 'clamp(16px, 4.4vw, 19px)', lineHeight: 1.55, fontWeight: 500, margin: 0,
+                    }}
                   >
                     {assistantSubtitle}
+                    {assistantInterrupted && (
+                      <span style={{ display: 'block', marginTop: 6, fontSize: 12, color: 'rgba(196,181,253,0.8)', fontWeight: 600 }}>
+                        — you interrupted, go ahead
+                      </span>
+                    )}
                   </p>
                 </div>
               </div>
@@ -921,8 +988,26 @@ export default function RealtimeBoothPage() {
                 borderRadius: 12,
                 padding: '16px 20px',
               }}>
-                <p style={{ color: '#fca5a5', fontWeight: 700, marginBottom: 6, fontSize: 14 }}>Connection issue</p>
-                <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }}>{errorMsg}</p>
+                <p style={{ color: '#fca5a5', fontWeight: 700, marginBottom: 6, fontSize: 14 }}>
+                  {micDenied ? 'Microphone access needed' : 'Connection issue'}
+                </p>
+                <p style={{ color: 'var(--color-text-secondary)', fontSize: 13, marginBottom: 12 }}>
+                  {micDenied
+                    ? 'The nurse cannot hear you without the microphone. Allow microphone access, then tap Try again. On iPhone: Settings → Safari → Microphone → Allow.'
+                    : errorMsg}
+                </p>
+                {micDenied && (
+                  <button
+                    onClick={() => window.location.reload()}
+                    style={{
+                      background: '#09f6ee', color: '#0a0f1e', fontWeight: 700,
+                      padding: '10px 16px', borderRadius: 10, border: 'none', fontSize: 13,
+                      minHeight: 44, marginRight: 10, marginBottom: 8,
+                    }}
+                  >
+                    Try again
+                  </button>
+                )}
                 <button
                   onClick={() => router.push(`/booth/${sessionId}/manual`)}
                   style={{
@@ -1138,14 +1223,29 @@ function toolError(e: unknown, fallback: string): { ok: false; error: string; gu
 // Wraps the dispatcher so every tool round trip is timed without any of the
 // handlers having to know about the tracker. The model is blocked on these
 // calls, so their duration is dead air the patient hears as silence.
+// Every tool call also has a hard deadline. The model is blocked on the
+// result; a hung backend must not hang the conversation — and the turn
+// watchdog would otherwise fire a response.create with no result, so the
+// nurse would talk past a recording that lands late.
+const TOOL_TIMEOUT_MS = 8000;
+
 function instrumentTools(tools: ToolDispatcher, latency: LatencyTracker): ToolDispatcher {
   const wrapped = {} as Record<string, (args: never) => Promise<unknown>>;
   for (const [name, fn] of Object.entries(tools)) {
     wrapped[name] = async (args: never) => {
       latency.toolStart(name);
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const deadline = new Promise<unknown>((resolve) => {
+        timer = setTimeout(() => resolve({
+          ok: false,
+          error: `${name} timed out`,
+          guidance: 'The record did not save in time. Briefly tell the patient you will note it down, and continue to the next question.',
+        }), TOOL_TIMEOUT_MS);
+      });
       try {
-        return await (fn as (a: never) => Promise<unknown>)(args);
+        return await Promise.race([(fn as (a: never) => Promise<unknown>)(args), deadline]);
       } finally {
+        if (timer) clearTimeout(timer);
         latency.toolEnd(name);
       }
     };

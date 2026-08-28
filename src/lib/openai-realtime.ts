@@ -25,6 +25,16 @@ export function detectDeviceProfile(): DeviceProfile {
   return coarse && window.innerWidth < 900 ? 'handheld' : 'kiosk';
 }
 
+/** getUserMedia refused or unavailable. Distinguished so the page can say
+ *  "microphone access is needed" instead of a generic connection error, and
+ *  so reconnect attempts (pointless here) are skipped. */
+export class MicPermissionError extends Error {
+  constructor(public readonly cause_name: string) {
+    super('Microphone access is needed for the voice assistant');
+    this.name = 'MicPermissionError';
+  }
+}
+
 export interface RealtimeSessionMint {
   client_secret: string;
   expires_at: number;
@@ -56,6 +66,11 @@ export interface RealtimeCallbacks {
    *  back to "listening". */
   onBargeIn?: () => void;
   onError: (msg: string) => void;
+  /** Raw RTCPeerConnection state. 'disconnected' is TRANSIENT — ICE is
+   *  probing and usually recovers within seconds; only 'failed'/'closed'
+   *  trigger onDisconnected. Lets the page show "Reconnecting…" instead of
+   *  tearing the session down on a Wi-Fi blip. */
+  onConnectionStateChange?: (state: RTCPeerConnectionState) => void;
   /** The model went silent when it should have spoken, and the client is
    *  re-prompting it. `attempt` is 1-based. Diagnostic only — the recovery is
    *  automatic. */
@@ -86,6 +101,93 @@ export interface ToolDispatcher {
   trigger_measurement: (args: { device_type: string }) => Promise<unknown>;
   flag_emergency: (args: { reason: string }) => Promise<unknown>;
   complete_triage: (args: Record<string, never>) => Promise<unknown>;
+}
+
+// ─── Pre-connect relays ─────────────────────────────────────────────────────
+// A client can be connected while the patient is still on the consent screen,
+// before the booth page (and its callbacks) exists. These stand in for the
+// page until attach(): events are buffered and replayed in order, tool calls
+// wait. Nothing is dropped.
+
+const RELAYED_EVENTS = [
+  'onConnected', 'onDisconnected', 'onUserTranscript', 'onAssistantTranscript',
+  'onResponseStart', 'onSpeakingStart', 'onSpeakingStop', 'onResponseComplete',
+  'onUserSpeechStart', 'onUserSpeechStop', 'onBargeIn', 'onError',
+  'onConnectionStateChange', 'onStall', 'onTurnForced', 'onAudioElement', 'onPhaseMark',
+] as const;
+
+export class CallbackRelay implements RealtimeCallbacks {
+  private target: RealtimeCallbacks | null = null;
+  private queue: Array<{ name: keyof RealtimeCallbacks; args: unknown[] }> = [];
+
+  // Required members of RealtimeCallbacks — assigned in the constructor loop.
+  onConnected!: RealtimeCallbacks['onConnected'];
+  onDisconnected!: RealtimeCallbacks['onDisconnected'];
+  onUserTranscript!: RealtimeCallbacks['onUserTranscript'];
+  onAssistantTranscript!: RealtimeCallbacks['onAssistantTranscript'];
+  onResponseStart!: RealtimeCallbacks['onResponseStart'];
+  onSpeakingStart!: RealtimeCallbacks['onSpeakingStart'];
+  onSpeakingStop!: RealtimeCallbacks['onSpeakingStop'];
+  onResponseComplete!: RealtimeCallbacks['onResponseComplete'];
+  onUserSpeechStart!: RealtimeCallbacks['onUserSpeechStart'];
+  onUserSpeechStop!: RealtimeCallbacks['onUserSpeechStop'];
+  onError!: RealtimeCallbacks['onError'];
+  onAudioElement!: RealtimeCallbacks['onAudioElement'];
+  onBargeIn?: RealtimeCallbacks['onBargeIn'];
+  onConnectionStateChange?: RealtimeCallbacks['onConnectionStateChange'];
+  onStall?: RealtimeCallbacks['onStall'];
+  onTurnForced?: RealtimeCallbacks['onTurnForced'];
+  onPhaseMark?: RealtimeCallbacks['onPhaseMark'];
+
+  constructor() {
+    for (const name of RELAYED_EVENTS) {
+      (this as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => {
+        const fn = this.target?.[name] as ((...a: unknown[]) => void) | undefined;
+        if (this.target) fn?.(...args);
+        else this.queue.push({ name, args });
+      };
+    }
+  }
+
+  attach(target: RealtimeCallbacks): void {
+    this.target = target;
+    const pending = this.queue;
+    this.queue = [];
+    for (const { name, args } of pending) {
+      const fn = target[name] as ((...a: unknown[]) => void) | undefined;
+      fn?.(...args);
+    }
+  }
+}
+
+export class ToolRelay implements ToolDispatcher {
+  private target: ToolDispatcher | null = null;
+  private waiters: Array<() => void> = [];
+
+  private ready(): Promise<void> {
+    if (this.target) return Promise.resolve();
+    return new Promise((resolve) => this.waiters.push(resolve));
+  }
+
+  private relay<K extends keyof ToolDispatcher>(name: K): ToolDispatcher[K] {
+    return (async (args: unknown) => {
+      await this.ready();
+      return (this.target![name] as (a: unknown) => Promise<unknown>)(args);
+    }) as ToolDispatcher[K];
+  }
+
+  submit_answer = this.relay('submit_answer');
+  update_answer = this.relay('update_answer');
+  trigger_measurement = this.relay('trigger_measurement');
+  flag_emergency = this.relay('flag_emergency');
+  complete_triage = this.relay('complete_triage');
+
+  attach(target: ToolDispatcher): void {
+    this.target = target;
+    const w = this.waiters;
+    this.waiters = [];
+    w.forEach((resolve) => resolve());
+  }
 }
 
 // GA SDP exchange endpoint. The beta `/v1/realtime?model=...` route was
@@ -151,6 +253,20 @@ export class RealtimeClient {
     private tools: ToolDispatcher,
   ) {}
 
+  /** Swap in the real page callbacks/tools on a client that was connected
+   *  ahead of time (see realtime-prewarm). Anything the relay buffered while
+   *  no page was listening is replayed to the new target. */
+  attach(callbacks: RealtimeCallbacks, tools: ToolDispatcher): void {
+    if (this.callbacks instanceof CallbackRelay) this.callbacks.attach(callbacks);
+    else this.callbacks = callbacks;
+    if (this.tools instanceof ToolRelay) this.tools.attach(tools);
+    else this.tools = tools;
+  }
+
+  get isConnected(): boolean {
+    return this.dc?.readyState === 'open';
+  }
+
   /** True once the server has emitted output_audio_buffer.* events — playback
    *  boundaries are exact and the caller can skip duration estimation. */
   get hasPlaybackEvents(): boolean {
@@ -187,9 +303,13 @@ export class RealtimeClient {
 
     // Local mic
     this.callbacks.onPhaseMark?.('mic_start');
-    this.localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    });
+    try {
+      this.localStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      throw new MicPermissionError((e as { name?: string })?.name ?? 'UnknownError');
+    }
     this.callbacks.onPhaseMark?.('mic_ready');
     for (const track of this.localStream.getTracks()) {
       this.pc.addTrack(track, this.localStream);
@@ -206,8 +326,10 @@ export class RealtimeClient {
 
     this.pc.onconnectionstatechange = () => {
       if (!this.pc) return;
-      if (this.pc.connectionState === 'failed' || this.pc.connectionState === 'closed') {
-        this.callbacks.onDisconnected(this.pc.connectionState);
+      const st = this.pc.connectionState;
+      this.callbacks.onConnectionStateChange?.(st);
+      if (st === 'failed' || st === 'closed') {
+        this.callbacks.onDisconnected(st);
       }
     };
 
