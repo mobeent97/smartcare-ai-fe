@@ -69,7 +69,7 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
       <span style={{ color: 'rgb(21, 81, 79)', fontSize: '16px' }}>|</span>
 
       {/* Nav tabs */}
-      <nav style={{ display: 'flex', alignItems: 'center', gap: '2px', marginLeft: '4px' }}>
+      <nav style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '4px' }}>
         {tabs.map((tab) => {
           const active = isActive(tab);
           return (
@@ -77,6 +77,12 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
               key={tab.href}
               onClick={() => router.push(tab.href)}
               style={{
+                // >=44px tall so the tap area matches the iOS minimum; the
+                // visual size is unchanged on desktop where the row is taller
+                // than the text anyway.
+                minHeight: 44,
+                display: 'inline-flex',
+                alignItems: 'center',
                 padding: '6px 14px',
                 borderRadius: '8px',
                 border: active ? '1px solid rgba(9,246,238,0.3)' : '1px solid transparent',
@@ -111,7 +117,16 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
       </div>
 
       {/* Notification bell */}
-      <button aria-label="Notifications" style={{ position: 'relative', cursor: 'pointer', padding: '8px', background: 'none', border: 'none' }}>
+      <button
+        aria-label="Notifications"
+        style={{
+          position: 'relative', cursor: 'pointer', padding: '8px',
+          background: 'none', border: 'none',
+          // Expand the hit area around a small icon rather than enlarging it.
+          minWidth: 44, minHeight: 44,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        }}
+      >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#5dd5d3" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M10.268 21a2 2 0 0 0 3.464 0" />
           <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />
@@ -157,7 +172,8 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
       <button
         onClick={() => { logout(); router.replace('/login'); }}
         style={{
-          display: 'flex', alignItems: 'center', gap: '6px',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
+          minHeight: 44,
           borderRadius: '8px', border: '1px solid rgb(21, 81, 79)',
           background: 'transparent', padding: '6px 12px',
           color: 'rgb(93, 213, 211)', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
