@@ -11,6 +11,12 @@ export const metadata: Metadata = {
   // Pinned to an iOS home screen this launches without Safari chrome. The
   // status bar sits ON TOP of the page, which is why every fixed edge below
   // uses the safe-area insets.
+  // Static files in public/ rather than build-time ImageResponse routes: one
+  // less thing to execute during a build, and no satori dependency.
+  icons: {
+    icon: [{ url: '/icon-192.png', sizes: '192x192', type: 'image/png' }],
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+  },
   appleWebApp: {
     capable: true,
     title: 'SmartCare',
