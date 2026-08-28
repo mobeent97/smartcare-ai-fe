@@ -75,7 +75,7 @@ export function QueuePanel({
       </div>
 
       {/* ── Scrollable patient list ────────────────────── */}
-      <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3.5">
+      <div className="tabbar-inset flex flex-1 flex-col gap-2 overflow-y-auto p-3.5">
         {sorted.length === 0 ? (
           <div className="py-12 text-center text-[13px] text-text-dim">
             No patients in queue

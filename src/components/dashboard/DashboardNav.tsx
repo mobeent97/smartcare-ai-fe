@@ -31,9 +31,15 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
 
   return (
     <header
+      className="sticky top-0 z-30"
       style={{
         minHeight: '64px',
-        background: 'rgb(5, 20, 20)',
+        // Translucent + blur so content scrolls under it, the way an iOS
+        // navigation bar behaves. Opaque fallback for browsers without
+        // backdrop-filter.
+        background: 'rgba(5, 20, 20, 0.82)',
+        backdropFilter: 'blur(20px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(20px) saturate(180%)',
         borderBottom: '1px solid rgb(11, 40, 39)',
         display: 'flex',
         alignItems: 'center',
@@ -69,7 +75,7 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
       <span style={{ color: 'rgb(21, 81, 79)', fontSize: '16px' }}>|</span>
 
       {/* Nav tabs */}
-      <nav style={{ display: 'flex', alignItems: 'center', gap: '8px', marginLeft: '4px' }}>
+      <nav className="hidden md:flex" style={{ alignItems: 'center', gap: '8px', marginLeft: '4px' }}>
         {tabs.map((tab) => {
           const active = isActive(tab);
           return (
@@ -95,7 +101,7 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
                 whiteSpace: 'nowrap',
               }}
             >
-              {tab.label === 'Admin' ? '⚙ Admin' : tab.label}
+              {tab.label}
             </button>
           );
         })}
@@ -104,8 +110,8 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
       {/* Spacer */}
       <div style={{ flex: '1 1 0%' }} />
 
-      {/* Booths Active */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+      {/* Booths Active — hidden on phones; the KPI strip already carries it */}
+      <div className="hidden md:flex" style={{ alignItems: 'center', gap: '6px' }}>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <rect width="20" height="14" x="2" y="3" rx="2" />
           <line x1="8" x2="16" y1="21" y2="21" />
@@ -144,7 +150,7 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
 
       {/* Role badge + user */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-        <span style={{
+        <span className="hidden md:inline" style={{
           fontSize: '10px', fontWeight: 700, padding: '2px 8px', borderRadius: '9999px',
           textTransform: 'capitalize',
           background: isAdmin ? 'rgba(168,85,247,0.15)' : 'rgba(9,246,238,0.1)',
@@ -171,7 +177,9 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
       {/* Sign Out */}
       <button
         onClick={() => { logout(); router.replace('/login'); }}
+        aria-label="Sign out"
         style={{
+          minWidth: 44,
           display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
           minHeight: 44,
           borderRadius: '8px', border: '1px solid rgb(21, 81, 79)',
@@ -179,12 +187,12 @@ export function DashboardNav({ activeBoothCount, hasAlert }: DashboardNavProps) 
           color: 'rgb(93, 213, 211)', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
         }}
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
           <polyline points="16 17 21 12 16 7" />
           <line x1="21" y1="12" x2="9" y2="12" />
         </svg>
-        Sign Out
+        <span className="hidden md:inline">Sign Out</span>
       </button>
     </header>
   );

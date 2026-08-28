@@ -296,3 +296,11 @@ body {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
+
+/* Reserve the fixed bottom tab bar's height inside scrolling regions, so the
+   last list row is reachable instead of sitting under the bar. Collapses to
+   nothing from md up, where the tab bar is not rendered. */
+.tabbar-inset { padding-bottom: calc(52px + var(--safe-bottom)); }
+@media (min-width: 768px) {
+  .tabbar-inset { padding-bottom: 0; }
+}

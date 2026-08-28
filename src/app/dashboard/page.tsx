@@ -212,7 +212,7 @@ function DashboardInner() {
         />
 
         {/* Main panel */}
-        <main className={`flex-1 overflow-y-auto ${caseParam ? 'block' : 'hidden md:block'}`}>
+        <main className={`tabbar-inset flex-1 overflow-y-auto ${caseParam ? 'block' : 'hidden md:block'}`}>
           {/* Back to the queue — phone only. */}
           {caseParam && (
             <button
