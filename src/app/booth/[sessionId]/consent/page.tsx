@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter, useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
-import { prewarmMic, prefetchMint } from '@/lib/realtime-prewarm';
+import { prewarmMic, prewarmConnection } from '@/lib/realtime-prewarm';
 import { useBoothStore } from '@/store/booth';
 
 // All audio prefetched in parallel while user reads consent
@@ -69,10 +69,11 @@ export default function ConsentPage() {
       router.push(`/booth/${sessionId}/manual`);
       return;
     }
-    // Start the ephemeral-key round trip now, so it overlaps the navigation and
-    // the realtime page's first render instead of running after them. Only ever
-    // after consent is recorded — minting builds instructions from the session.
-    prefetchMint(sessionId);
+    // Mint AND open the WebRTC connection now, so the ~2–3s handshake overlaps
+    // the navigation instead of running after it. Only ever after consent is
+    // recorded — minting builds instructions from the session. The greeting is
+    // not requested until the booth page is on screen.
+    prewarmConnection(sessionId);
     router.push(`/booth/${sessionId}/realtime`);
   }
 
