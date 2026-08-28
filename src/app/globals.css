@@ -304,3 +304,31 @@ body {
 @media (min-width: 768px) {
   .tabbar-inset { padding-bottom: 0; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════ */
+/* BOOTH — voice call layout                                               */
+/* ═══════════════════════════════════════════════════════════════════════ */
+
+/* Fixed control bar height, reserved by the scrolling content above it. */
+:root { --booth-controls-h: 76px; }
+
+/* Phone landscape (any modern iPhone on its side): orb beside captions so
+   the conversation still fits without scrolling. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .booth-stage {
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 24px !important;
+  }
+  .booth-stage > * { flex: 1 1 0; min-width: 0; }
+  .booth-orb { width: min(200px, 34vh) !important; height: min(200px, 34vh) !important; }
+}
+
+/* Reduced motion: the orb still changes colour/border by state, it just
+   stops pulsing. */
+@media (prefers-reduced-motion: reduce) {
+  .booth-orb, .booth-orb * { animation: none !important; }
+}
+
+/* Captions: avoid orphaned last words on narrow screens. */
+.caption-text { text-wrap: pretty; }

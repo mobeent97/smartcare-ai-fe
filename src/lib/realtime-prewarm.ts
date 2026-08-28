@@ -14,7 +14,7 @@
 //     minting builds system instructions from the session. Never before.
 
 import { api } from './api';
-import type { RealtimeSessionMint } from './openai-realtime';
+import { detectDeviceProfile, type RealtimeSessionMint } from './openai-realtime';
 
 interface CachedMint {
   sessionId: string;
@@ -62,7 +62,7 @@ export function prefetchMint(sessionId: string): void {
     sessionId,
     value: null,
     promise: api
-      .createRealtimeSession(sessionId)
+      .createRealtimeSession(sessionId, detectDeviceProfile())
       .then((mint) => {
         entry.value = mint;
         return mint;

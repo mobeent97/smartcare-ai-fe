@@ -143,6 +143,15 @@ class ApiClient {
     return res.data;
   }
 
+  /** Patient pressed "Call for help" in the booth. Staff get a dashboard alert. */
+  async requestHelp(sessionId: string, reason = 'patient_request') {
+    const res = await this.client.post<ApiResponse<{ ok: boolean; message: string }>>(
+      `/triage/sessions/${sessionId}/help/`,
+      { reason },
+    );
+    return res.data;
+  }
+
   /** Returns the absolute PDF download URL — opens in a new tab so the
    *  browser handles the file save dialog natively. */
   getSessionPdfUrl(sessionId: string): string {
@@ -167,18 +176,23 @@ class ApiClient {
     return res.data.data;
   }
 
-  async createRealtimeSession(sessionId: string): Promise<{
+  async createRealtimeSession(
+    sessionId: string,
+    device: 'handheld' | 'kiosk' = 'kiosk',
+  ): Promise<{
     client_secret: string;
     expires_at: number;
     realtime_session_id: string;
     model: string;
+    webrtc_url?: string;
   }> {
     const res = await this.client.post<ApiResponse<{
       client_secret: string;
       expires_at: number;
       realtime_session_id: string;
       model: string;
-    }>>('/triage/realtime/session/', { session_id: sessionId });
+      webrtc_url?: string;
+    }>>('/triage/realtime/session/', { session_id: sessionId, device });
     return res.data.data;
   }
 

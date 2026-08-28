@@ -20,6 +20,7 @@ import { QueuePanel } from '@/components/dashboard/QueuePanel';
 import { CTASBadge } from '@/components/dashboard/CTASBadge';
 import { VitalCard } from '@/components/dashboard/VitalCard';
 import { EmergencyAlertModal } from '@/components/dashboard/EmergencyAlertModal';
+import { HelpRequestModal } from '@/components/dashboard/HelpRequestModal';
 import { DeteriorationAlertModal } from '@/components/dashboard/DeteriorationAlertModal';
 import { MetricsPanel } from '@/components/dashboard/MetricsPanel';
 import { LoadingSpinner } from '@/components/common/LoadingSpinner';
@@ -52,6 +53,7 @@ function DashboardInner() {
     queue, setQueue, updateQueueItem, addOrUpdateQueueItem, removeFromQueue,
     emergencyAlert, setEmergencyAlert, clearEmergencyAlert,
     deteriorationAlert, setDeteriorationAlert, clearDeteriorationAlert,
+    helpRequest, setHelpRequest, clearHelpRequest,
   } = useDashboardStore();
 
   const [tab, setTab] = useState<Tab>('summary');
@@ -91,11 +93,15 @@ function DashboardInner() {
         // Update queue item CTAS badge immediately
         updateQueueItem(alert.sessionId, { ctas_level: alert.newCtas as 1|2|3|4|5 });
         setDeteriorationAlert(alert);
-      }
+      },
+      (alert) => {
+        // Patient pressed "Call for help" — a person is needed at the booth.
+        setHelpRequest(alert);
+      },
     );
     ws.connect();
     return () => ws.disconnect();
-  }, [_hasHydrated, accessToken, router, setQueue, updateQueueItem, addOrUpdateQueueItem, setEmergencyAlert]);
+  }, [_hasHydrated, accessToken, router, setQueue, updateQueueItem, addOrUpdateQueueItem, setEmergencyAlert, setDeteriorationAlert, setHelpRequest]);
 
   useEffect(() => {
     if (!caseParam || !accessToken) {
@@ -252,6 +258,17 @@ function DashboardInner() {
           )}
         </main>
       </div>
+
+      {helpRequest && (
+        <HelpRequestModal
+          alert={helpRequest}
+          onView={() => {
+            selectCase(helpRequest.sessionId);
+            clearHelpRequest();
+          }}
+          onDismiss={clearHelpRequest}
+        />
+      )}
 
       {emergencyAlert && (
         <EmergencyAlertModal
