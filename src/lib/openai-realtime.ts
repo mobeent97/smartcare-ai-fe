@@ -37,6 +37,10 @@ export interface RealtimeCallbacks {
   onUserSpeechStart: () => void;
   /** User stopped talking, model is processing. UI should show "thinking". */
   onUserSpeechStop: () => void;
+  /** The user barged in while the model was speaking — the server cleared the
+   *  output audio buffer (output_audio_buffer.cleared). UI should drop straight
+   *  back to "listening". */
+  onBargeIn?: () => void;
   onError: (msg: string) => void;
   onAudioElement: (el: HTMLAudioElement) => void;
 }
@@ -63,12 +67,27 @@ export class RealtimeClient {
   // responses emit response.done with no audio — we must not flip phase to
   // "listening" in that case (the model will immediately start a new response).
   private currentResponseHasAudio = false;
+  // GA WebRTC emits output_audio_buffer.started/stopped/cleared — exact
+  // playback boundaries. Once seen, the page can skip its transcript-length
+  // playback estimator and trust onSpeakingStop from the .stopped event.
+  private playbackEventsSeen = false;
+  // response.create while a response is still active errors ("conversation
+  // already has an active response"). Track active state; if a tool result
+  // lands mid-response, defer the create until response.done.
+  private responseActive = false;
+  private pendingResponseCreate = false;
 
   constructor(
     private mint: RealtimeSessionMint,
     private callbacks: RealtimeCallbacks,
     private tools: ToolDispatcher,
   ) {}
+
+  /** True once the server has emitted output_audio_buffer.* events — playback
+   *  boundaries are exact and the caller can skip duration estimation. */
+  get hasPlaybackEvents(): boolean {
+    return this.playbackEventsSeen;
+  }
 
   /** Returns seconds remaining on the ephemeral key. */
   secondsUntilExpiry(): number {
@@ -146,6 +165,15 @@ export class RealtimeClient {
     this.send({ type: 'response.create' });
   }
 
+  /** Gate the mic track. Hybrid mode disables it while the live avatar speaks
+   *  through the kiosk speaker — otherwise the model hears its own lines as
+   *  "user speech" (echo cancellation doesn't cover a separate audio path)
+   *  and produces ghost turns. Track stays live (no renegotiation); disabled
+   *  tracks transmit silence. */
+  setMicEnabled(enabled: boolean): void {
+    this.localStream?.getAudioTracks().forEach((t) => { t.enabled = enabled; });
+  }
+
   private handleServerEvent(raw: string): void {
     let evt: Record<string, unknown>;
     try {
@@ -165,7 +193,26 @@ export class RealtimeClient {
         break;
       case 'response.created':
         this.currentResponseHasAudio = false;
+        this.responseActive = true;
         this.callbacks.onResponseStart();
+        break;
+      // GA WebRTC playback boundaries: the server tracks the audio it has
+      // streamed onto the RTP track. These are EXACT — unlike response.done,
+      // which fires while several seconds of audio are still buffered/playing.
+      case 'output_audio_buffer.started':
+        this.playbackEventsSeen = true;
+        this.currentResponseHasAudio = true;
+        this.callbacks.onSpeakingStart();
+        break;
+      case 'output_audio_buffer.stopped':
+        this.playbackEventsSeen = true;
+        this.callbacks.onSpeakingStop();
+        break;
+      case 'output_audio_buffer.cleared':
+        // Server dropped the remaining audio (barge-in / response.cancel).
+        this.playbackEventsSeen = true;
+        this.callbacks.onSpeakingStop();
+        this.callbacks.onBargeIn?.();
         break;
       case 'response.audio.delta':
       case 'response.output_audio.delta': // GA rename
@@ -186,9 +233,17 @@ export class RealtimeClient {
       case 'response.done': {
         const hadAudio = this.currentResponseHasAudio;
         this.currentResponseHasAudio = false;
+        this.responseActive = false;
+        // A tool result arrived while this response was still active — its
+        // response.create was deferred to here.
+        if (this.pendingResponseCreate) {
+          this.pendingResponseCreate = false;
+          this.send({ type: 'response.create' });
+        }
         // Tool-call-only responses produce no audio: clear phase immediately.
         // Audio-bearing responses delegate the stop to the page (it knows the
-        // accumulated transcript length and can estimate playback duration).
+        // accumulated transcript length and can estimate playback duration),
+        // or to output_audio_buffer.stopped when playback events are available.
         if (!hadAudio) {
           this.callbacks.onSpeakingStop();
         }
@@ -256,8 +311,17 @@ export class RealtimeClient {
         output: JSON.stringify(result ?? {}),
       },
     });
-    // Ask model to continue speaking
-    this.send({ type: 'response.create' });
+    // Ask model to continue speaking. If a response is still active (parallel
+    // tool calls in one response), response.create would error — defer it to
+    // response.done instead.
+    if (this.responseActive) {
+      this.pendingResponseCreate = true;
+    } else {
+      // Optimistically mark active so a second tool completing before the
+      // server's response.created round-trip defers instead of double-creating.
+      this.responseActive = true;
+      this.send({ type: 'response.create' });
+    }
   }
 
   private send(payload: Record<string, unknown>): void {
